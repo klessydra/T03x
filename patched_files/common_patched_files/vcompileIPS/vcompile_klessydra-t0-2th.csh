@@ -5,7 +5,7 @@ source ${PULP_PATH}/./vsim/vcompile/setup.csh
 # Settings
 ##############################################################################
 
-set IP=klessydra-t0-3th
+set IP=klessydra-t0-2th
 
 ##############################################################################
 # Check settings
@@ -24,7 +24,7 @@ endif
 
 set LIB_NAME="${IP}_lib"
 set LIB_PATH="${MSIM_LIBS_PATH}/${LIB_NAME}"
-set IP_PATH="${IPS_PATH}/klessydra-t0-3th"
+set IP_PATH="${IPS_PATH}/klessydra-t0-2th"
 set RTL_PATH="${RTL_PATH}"
 
 ##############################################################################
@@ -46,7 +46,7 @@ else
 endif
 
 echo "${Green}--> Compiling ${IP}... ${NC}"
-echo "${Green}Compiling component: ${Brown} klessydra-t0-3th ${NC}"
+echo "${Green}Compiling component: ${Brown} klessydra-t0-2th ${NC}"
 echo "${Red}"
 vcom -2008 -quiet -suppress 2583 -work ${LIB_PATH}   ${IP_PATH}/PKG_RiscV_Klessydra_thread_parameters.vhd || goto error
 vcom -2008 -quiet -suppress 2583 -work ${LIB_PATH}   ${IP_PATH}/PKG_RiscV_Klessydra.vhd || goto error
