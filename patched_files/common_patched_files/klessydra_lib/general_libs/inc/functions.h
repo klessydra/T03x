@@ -1,8 +1,3 @@
-/*
-AUTORS: Nini Francesco, Ponzio Simone
-DESCRIPTION: This header file contents some functions developed for Klessydra TO core
-*/
-
 #include "klessydra_defs.h"
 
 #define MHARTID_IDCORE_MASK 15

@@ -113,7 +113,12 @@ set(VSIM "vsim" CACHE FILEPATH "Path to the vsim executable")
    set(crt0_boot "ref/crt0.boot.S")
  endif()
 
- include_directories(libs/klessydra_lib/inc)
+ include_directories(libs/klessydra_lib/general_libs/inc)
+
+ if (${USE_KLESSYDRA_T1_3TH})
+   include_directories(libs/klessydra_lib/dsp_libs/inc) 
+ endif()
+
  include_directories(libs/sys_lib/inc)
  if(${ARDUINO_LIB})
    include_directories(libs/Arduino_lib/core_libs/inc)
@@ -178,7 +183,12 @@ add_custom_target(vcompile.core.zero
 
 ################################################################################
 
-add_subdirectory(libs/klessydra_lib)
+add_subdirectory(libs/klessydra_lib/general_libs)
+
+if (${USE_KLESSYDRA_T1_3TH})
+  add_subdirectory(libs/klessydra_lib/dsp_libs)
+endif()
+
 add_subdirectory(libs/string_lib)
 add_subdirectory(libs/sys_lib)
 add_subdirectory(libs/bench_lib)
