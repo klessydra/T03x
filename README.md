@@ -18,8 +18,6 @@ https://github.com/klessydra/T13x
 
 # Merging T03x User Guide
 
-Intro: The Klessydra processing core family is a set of processors featuring full compliance with the RISC-V, and pin-to-pin compatible with the PULPino riscy cores. Klessydra cores fully support the RV32I Base Integer Instruction set, and one instruction from the RV32A extension. The only privilege level supported in klessydra is Machine mode "M".
-
 This guide explains how one can download and install Pulpino, and it's 
 modified version of the riscv-gnu toolchain. It also demonstrates
 how to patch the offcial riscv-toolchain in order to add the klessydra 
