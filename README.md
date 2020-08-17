@@ -1,3 +1,21 @@
+<img src="/pics/Klessydra_Logo.png" width="400">
+
+# KLESSYDRA-T03 INTRELEAVED MULTITHREADED PROCESSOR
+
+Intro: The Klessydra processing core family is a set of processors featuring full compliance with RISC-V, and pin-to-pin compatible with the PULPino Riscy cores. Klessydra-T03 is a bare-metal 32-bit processor supporting the RV32I from the RISC-V ISA, and one instruction from the Atomic "A" extension.
+
+Architecture: T03 is an interleaved multithreaded processor (Aka, barrel processor). It interleaves three hardware threads (harts). Each hart has it's own registerfile, CSR-unit, and program counter, and they communicate with each other via software interrupts.
+
+Fencing role of the harts: The harts in our IMT archtiecture play an essential fencing role to avoid pipeline stalls. One role is to fence between registerfile RD & WR accesses, thus never having data-dependency pipeline stalls. The other is to fence between the execution and fetch stage, thus avoiding the need to perform any pipeline flushing.
+
+<p align="center">
+<img src="/pics/Klessydra-T03x.png" width="600">
+</p>
+
+A more advanced, and highly parametrizable version of the T03 is the T13 available at:
+
+https://github.com/klessydra/T13x
+
 # Merging T03x User Guide
 
 Intro: The Klessydra processing core family is a set of processors featuring full compliance with the RISC-V, and pin-to-pin compatible with the PULPino riscy cores. Klessydra cores fully support the RV32I Base Integer Instruction set, and one instruction from the RV32A extension. The only privilege level supported in klessydra is Machine mode "M".
