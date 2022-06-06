@@ -4,7 +4,7 @@ Klessydra-T03x:
   ]
   files: [
     klessydra-t0-3th/PKG_RiscV_Klessydra_thread_parameters.vhd,
-    klessydra-t0-3th/PKG_RiscV_Klessydra.vhd
+    klessydra-t0-3th/PKG_RiscV_Klessydra.vhd,
     klessydra-t0-3th/RTL-Processing_Pipeline.vhd,
     klessydra-t0-3th/PKG_RiscV_Klessydra.vhd,
     klessydra-t0-3th/RTL-Program_Counter_unit.vhd,
