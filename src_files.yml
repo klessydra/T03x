@@ -3,12 +3,14 @@ Klessydra-T03x:
     .,
   ]
   files: [
-    klessydra-t0-3th/PKG_RiscV_Klessydra_thread_parameters.vhd,
     klessydra-t0-3th/PKG_RiscV_Klessydra.vhd,
     klessydra-t0-3th/RTL-Processing_Pipeline.vhd,
-    klessydra-t0-3th/PKG_RiscV_Klessydra.vhd,
+    klessydra-t0-3th/RTL-Registerfile.vhd,
+    klessydra-t0-3th/RTL-IF_STAGE.vhd,
+    klessydra-t0-3th/RTL-ID_STAGE.vhd,
+    klessydra-t0-3th/RTL-IE_STAGE.vhd,
+    klessydra-t0-3th/RTL-Load_Store_Unit.vhd,
     klessydra-t0-3th/RTL-Program_Counter_unit.vhd,
     klessydra-t0-3th/RTL-CSR_Unit.vhd,
-    klessydra-t0-3th/STR-Klessydra_top.vhd,
-    klessydra-t0-3th/RTL-Debug_Unit.vhd
+    klessydra-t0-3th/STR-Klessydra_Core.vhd,
   ]
