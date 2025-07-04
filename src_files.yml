@@ -12,5 +12,6 @@ Klessydra-T03x:
     klessydra-t0-3th/RTL-Load_Store_Unit.vhd,
     klessydra-t0-3th/RTL-Program_Counter_unit.vhd,
     klessydra-t0-3th/RTL-CSR_Unit.vhd,
+    klessydra-t0-3th/RTL-Debug_Unit.vhd,
     klessydra-t0-3th/STR-Klessydra_Core.vhd,
   ]
