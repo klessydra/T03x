@@ -52,7 +52,7 @@ entity klessydra_t0_3th_core is
     MINSTRET_EN             : natural := 0;   -- Can be set to 1 or 0 only. Setting to zero will disable MINSTRET and MINSTRETH
     MHPMCOUNTER_EN          : natural := 0;   -- Can be set to 1 or 0 only. Setting to zero will disable all performance counters except "MCYCLE/H" and "MINSTRET/H"
     count_all               : natural := 1;   -- Perfomance counters count for all the harts instead of there own hart
-    debug_en                : natural := 0;   -- Generates the debug unit
+    debug_en                : natural := 1;   -- Generates the debug unit
     tracer_en               : natural := 0;   -- Enables the generation of the instruction tracer disable in extremely long simulations in order to save storage space
     ----------------------------------------------------------------------------------------
     Data_Width              : natural := 32;
@@ -77,6 +77,10 @@ entity klessydra_t0_3th_core is
     instr_rvalid_i          : in  std_logic;
     instr_addr_o            : out std_logic_vector(31 downto 0);
     instr_rdata_i           : in  std_logic_vector(31 downto 0);
+    instr_we_o              : out std_logic;
+    instr_be_o              : out std_logic_vector(3 downto 0);
+    instr_wdata_o           : out std_logic_vector(31 downto 0);
+    instr_axi_rvalid        : in  std_logic;
     -- data memory interface
     data_req_o              : out std_logic;
     data_gnt_i              : in  std_logic;
@@ -95,16 +99,12 @@ entity klessydra_t0_3th_core is
     irq_sec_i               : in  std_logic;  -- unused in Pulpino
     sec_lvl_o               : out std_logic;  -- unused in Pulpino
     -- debug interface
-    debug_req_i             : in  std_logic;
-    debug_gnt_o             : out std_logic;
-    debug_rvalid_o          : out std_logic;
-    debug_addr_i            : in  std_logic_vector(14 downto 0);
-    debug_we_i              : in  std_logic;
-    debug_wdata_i           : in  std_logic_vector(31 downto 0);
-    debug_rdata_o           : out std_logic_vector(31 downto 0);
-    debug_halted_o          : out std_logic;
-    debug_halt_i            : in  std_logic;
-    debug_resume_i          : in  std_logic;
+    debug_req_i             : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    debug_havereset         : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    debug_running           : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    debug_halted            : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    dm_halt_addr_i          : in  std_logic_vector(31 downto 0);
+    dm_exception_addr_i     : in  std_logic_vector(31 downto 0);
     -- miscellanous control signals
     fetch_enable_i          : in  std_logic;
     core_busy_o             : out std_logic;
@@ -208,9 +208,6 @@ architecture Klessydra_M of klessydra_t0_3th_core is
   --signal external_counter    : std_logic_vector(63 downto 0);  -- RDTIME
   --signal instruction_counter : std_logic_vector(63 downto 0);  -- RDINSTRET
 
-  -- regfile replicated array
-  signal regfile            : regfile_array;
-
   --signal used by counters
   signal set_wfi_condition          : std_logic;
   signal harc_to_csr                : natural range THREAD_POOL_SIZE_GLOBAL-1 downto 0;
@@ -224,7 +221,27 @@ architecture Klessydra_M of klessydra_t0_3th_core is
   signal data_be_internal       : std_logic_vector(3 downto 0);
 
   --Debug Unit signal and state
-  signal ebreak_instr    : std_logic;
+  signal ebreak_instr                : std_logic;
+  signal dret_instr                  : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal halt_req                    : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal DEBUG_MODE                  : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal debug_cause                 : debug_cause_array;
+  signal DPC                         : harc_vec_array;
+  signal halt_served                 : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal ebreak_dbg                  : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal reset_state                 : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal irq_en_single_step          : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal single_stepping             : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal state_waiting_for_halt_serv : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal halt_req_wire               : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal fetch_busy_dbg              : std_logic;
+  signal gnt_waiting                 : std_logic;
+  signal taken_branch_addr           : std_logic_vector(31 downto 0);
+  signal wfi_exec                    : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal amo_load_skip               : std_logic;
+  signal amo_load                    : std_logic;
+  signal amo_store                   : std_logic;
+  signal debug_pc_taken_wire         : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
 
   -- hardware context id at fetch, and propagated hardware context ids
   --signal harc_count            : harc_min_range;
@@ -234,6 +251,13 @@ architecture Klessydra_M of klessydra_t0_3th_core is
   -- Internal signal (VHDL1993)
   signal data_we_o_int          : std_logic;
   signal data_req_o_int         : std_logic;
+
+  signal debug_havereset_int    : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal debug_running_int      : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal debug_halted_int       : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal instr_we_int         : std_logic;
+  signal instr_be_int         : std_logic_vector(3 downto 0);
+  signal instr_wdata_int      : std_logic_vector(31 downto 0);
 
   function and_const(a: natural; b: natural) return natural is
     variable c : natural;
@@ -261,226 +285,320 @@ architecture Klessydra_M of klessydra_t0_3th_core is
     return h;
   end function add_vect_bits;
 
-  component Program_Counter
-  generic (
-    THREAD_POOL_SIZE                  : natural
-  );
-  port (
-    absolute_jump                     : in  std_logic_vector(harc_range);
-    data_we_o_lat                     : in  std_logic;
-    absolute_address                  : in  std_logic_vector(31 downto 0);
-    PC_offset                         : in  std_logic_vector(31 downto 0);
-    taken_branch                      : in  std_logic;
-    ie_taken_branch                   : in  std_logic;
-    ls_taken_branch                   : in  std_logic;
-    set_branch_condition              : in  std_logic;
-    ie_except_condition               : in  std_logic;
-    ls_except_condition               : in  std_logic;
-    set_except_condition              : in  std_logic;
-    set_mret_condition                : in  std_logic;
-    set_wfi_condition                 : in  std_logic;
-    harc_ID                           : in  harc_range;
-    harc_EXEC                         : in  natural range THREAD_POOL_SIZE-1 downto 0;
-    instr_rvalid_IE                   : in  std_logic;
-    pc_ID                             : in  std_logic_vector(31 downto 0);
-    pc_IE                             : in  std_logic_vector(31 downto 0);
-    MSTATUS                           : in  MSTATUS_array;
-    MIP, MEPC, MCAUSE, MTVEC          : in  harc_vec_array;
-    instr_word_IE                     : in  std_logic_vector(31 downto 0);
-    pc_IF                             : out std_logic_vector(31 downto 0);
-    harc_IF                           : out harc_range;
-    served_ie_except_condition        : out std_logic_vector(harc_range);
-    served_ls_except_condition        : out std_logic_vector(harc_range);
-    served_except_condition           : out std_logic_vector(harc_range);
-    served_mret_condition             : out std_logic_vector(harc_range);
-    served_irq                        : in  std_logic_vector(harc_range);
-    taken_branch_pending              : out std_logic_vector(harc_range);
-    incremented_pc                    : out harc_vec_array;
-    irq_pending                       : out std_logic_vector(harc_range);
-    PC_offset_ID                      : in  std_logic_vector(31 downto 0);
-    set_branch_condition_ID           : in  std_logic;
-    clk_i                             : in  std_logic;
-    rst_ni                            : in  std_logic;
-    irq_i                             : in  std_logic;
-    fetch_enable_i                    : in  std_logic;
-    boot_addr_i                       : in  std_logic_vector(31 downto 0);
-    instr_gnt_i                       : in  std_logic
+  component Program_Counter is
+    generic (
+      debug_en                          : natural;
+      THREAD_POOL_SIZE                  : natural
+    );
+    port (
+      absolute_jump                     : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      data_we_o_lat                     : in  std_logic;
+      absolute_address                  : in  std_logic_vector(31 downto 0);
+      PC_offset                         : in  std_logic_vector(31 downto 0);
+      taken_branch                      : in  std_logic;
+      ie_taken_branch                   : in  std_logic;
+      ls_taken_branch                   : in  std_logic;
+      set_branch_condition              : in  std_logic;
+      ie_except_condition               : in  std_logic;
+      ls_except_condition               : in  std_logic;
+      set_except_condition              : in  std_logic;
+      set_mret_condition                : in  std_logic;
+      set_wfi_condition                 : in  std_logic;
+      ------------------------------------------------------------------------------
+      gnt_waiting                       : in  std_logic;
+      fetch_busy_dbg                    : in  std_logic;
+      DEBUG_MODE                        : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      DPC                               : in  harc_vec_array;
+      halt_req                          : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      debug_pc_taken_wire               : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      halt_served                       : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      reset_state                       : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      dm_halt_addr_i                    : in  std_logic_vector(31 downto 0);
+      dm_exception_addr_i               : in  std_logic_vector(31 downto 0);
+      taken_branch_addr_out             : out std_logic_vector(31 downto 0);
+      dret_instr                        : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0); 
+      state_waiting_for_halt_serv       : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0); 
+      ------------------------------------------------------------------------------
+      harc_ID                           : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      harc_EXEC                         : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      instr_rvalid_IE                   : in  std_logic;
+      pc_ID                             : in  std_logic_vector(31 downto 0);
+      pc_IE                             : in  std_logic_vector(31 downto 0);
+      MSTATUS                           : in  MSTATUS_array;
+      MIP, MEPC, MCAUSE, MTVEC          : in  harc_vec_array;
+      instr_word_IE                     : in  std_logic_vector(31 downto 0);
+      pc_IF                             : out std_logic_vector(31 downto 0);
+      harc_IF                           : out natural range THREAD_POOL_SIZE-1 downto 0;
+      served_ie_except_condition        : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      served_ls_except_condition        : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      served_except_condition           : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      served_mret_condition             : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      served_irq                        : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      taken_branch_pending              : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      incremented_pc                    : out harc_vec_array;
+      irq_pending                       : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      PC_offset_ID                      : in  std_logic_vector(31 downto 0);
+      set_branch_condition_ID           : in  std_logic;
+      clk_i                             : in  std_logic;
+      rst_ni                            : in  std_logic;
+      irq_i                             : in  std_logic;
+      fetch_enable_i                    : in  std_logic;
+      boot_addr_i                       : in  std_logic_vector(31 downto 0);
+      instr_gnt_i                       : in  std_logic
+      );
+  end component;
+
+  component CSR_Unit is
+    generic (
+      THREAD_POOL_SIZE_GLOBAL : natural;
+      THREAD_POOL_SIZE        : natural;
+      MCYCLE_EN               : natural;
+      MINSTRET_EN             : natural;
+      MHPMCOUNTER_EN          : natural;
+      RF_CEIL                 : natural;
+      debug_en                : natural;
+      count_all               : natural
+    );
+    port (
+      pc_IE                       : in  std_logic_vector(31 downto 0);
+      ie_except_data              : in  std_logic_vector(31 downto 0);
+      ls_except_data              : in  std_logic_vector(31 downto 0);
+      served_ie_except_condition  : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      served_ls_except_condition  : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      harc_EXEC                   : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      harc_ID                     : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      harc_IF                     : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      harc_to_csr                 : in  natural range THREAD_POOL_SIZE_GLOBAL-1 downto 0;
+      instr_word_IE               : in  std_logic_vector(31 downto 0);
+      served_except_condition     : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      served_mret_condition       : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      served_irq                  : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      served_pending_irq          : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      pc_except_value_wire        : in  harc_vec_array;
+      data_addr_internal          : in  std_logic_vector(31 downto 0);
+      jump_instr                  : in  std_logic;
+      branch_instr                : in  std_logic;
+      set_branch_condition        : in  std_logic;
+      csr_instr_req               : in  std_logic;
+      misaligned_err              : in  std_logic;
+      WFI_Instr                   : in  std_logic;
+      csr_wdata_i                 : in  std_logic_vector (31 downto 0);
+      csr_op_i                    : in  std_logic_vector (2 downto 0);
+      csr_addr_i                  : in  std_logic_vector (11 downto 0);
+      csr_instr_done              : out std_logic;
+      csr_access_denied_o         : out std_logic;
+      csr_rdata_o                 : out std_logic_vector (31 downto 0);
+      MHARTID                     : out MHARTID_array;  -- AAA adjust the size of mhartID
+      MSTATUS                     : out MSTATUS_array;
+      MEPC                        : out harc_vec_array;
+      MCAUSE                      : out harc_vec_array;
+      MIP                         : out harc_vec_array;
+      MTVEC                       : out harc_vec_array;
+      MSCRATCH                    : out harc_vec_array;
+      PCER                        : out harc_vec_array;
+      --Debug added signals-----------------------------------------------------------
+      pc_ID                       : in  std_logic_vector(31 downto 0);
+      pc_IF                       : in  std_logic_vector(31 downto 0);
+      DPC                         : out harc_vec_array;
+      DEBUG_MODE                  : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      wfi_exec                    : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      taken_branch_addr           : in  std_logic_vector (31 downto 0);
+      halt_req                    : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      irq_en_single_step          : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      single_stepping             : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      debug_cause                 : in  debug_cause_array;
+      dret_instr                  : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      ebreak_instr                : in  std_logic;
+      halt_served                 : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      ebreak_dbg                  : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      taken_branch                : in  std_logic; 
+  ----------------------------------------------------------------------------------------
+      fetch_enable_i              : in  std_logic;
+      clk_i                       : in  std_logic;
+      rst_ni                      : in  std_logic;
+      core_id_i                   : in  std_logic_vector(3 downto 0);
+      instr_rvalid_i              : in  std_logic;
+      instr_rvalid_IE             : in  std_logic;
+      data_we_o                   : in  std_logic;
+      data_req_o                  : in  std_logic;
+      data_gnt_i                  : in  std_logic;
+      irq_i                       : in  std_logic;
+      irq_id_i                    : in  std_logic_vector(4 downto 0);
+      irq_id_o                    : out std_logic_vector(4 downto 0);
+      irq_ack_o                   : out std_logic;
+      sw_irq                      : in  std_logic_vector(THREAD_POOL_SIZE_GLOBAL-1 downto 0);
+      sw_irq_pending              : in  std_logic_vector(THREAD_POOL_SIZE_GLOBAL-1 downto 0)
+      );
+  end component;
+
+  component Pipeline is
+    generic(
+      ThREAD_POOL_SIZE           : natural;
+      THREAD_POOL_SIZE_GLOBAL    : natural;
+      lutram_rf                  : natural;
+      latch_rf                   : natural;
+      RV32E                      : natural;
+      RV32M                      : natural;
+      superscalar_exec_en        : natural;
+      MCYCLE_EN                  : natural;
+      MINSTRET_EN                : natural;
+      MHPMCOUNTER_EN             : natural;
+      count_all                  : natural;
+      debug_en                   : natural;
+      tracer_en                  : natural;
+      --------------------------------
+      RF_SIZE                    : natural;
+      RF_CEIL                    : natural
+    );
+    port (
+      pc_IF                      : in  std_logic_vector(31 downto 0);
+      harc_IF                    : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      irq_pending                : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      csr_instr_done             : in  std_logic;
+      csr_access_denied_o        : in  std_logic;
+      csr_rdata_o                : in  std_logic_vector (31 downto 0);
+      MHARTID                    : in  MHARTID_array;
+      MSTATUS                    : in  MSTATUS_array;
+      PCER                       : in  harc_vec_array;
+      --------------------------------------------------------------------------------
+      DEBUG_MODE                 : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      halt_req                   : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      halt_req_wire              : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      debug_pc_taken_wire        : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      irq_en_single_step         : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      single_stepping            : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      amo_load                   : out  std_logic;
+      amo_load_skip              : out  std_logic;
+      amo_store                  : out std_logic;
+      dret_instr                 : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      gnt_waiting                : out std_logic;
+      fetch_busy_dbg             : out std_logic;
+      wfi_exec                   : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      instr_axi_rvalid           : in  std_logic;
+      --------------------------------------------------------------------------------
+      served_irq                 : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      served_pending_irq         : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      WFI_Instr                  : out std_logic;
+      misaligned_err             : out std_logic;
+      pc_ID                      : out std_logic_vector(31 downto 0);
+      pc_IE                      : out std_logic_vector(31 downto 0);
+      ie_except_data             : out std_logic_vector(31 downto 0);
+      ls_except_data             : out std_logic_vector(31 downto 0);
+      taken_branch               : out std_logic;
+      ie_taken_branch            : out std_logic;
+      ls_taken_branch            : out std_logic;
+      set_branch_condition       : out std_logic;
+      set_except_condition       : out std_logic;
+      ie_except_condition        : out std_logic;
+      ls_except_condition        : out std_logic;
+      set_mret_condition         : out std_logic;
+      set_wfi_condition          : out std_logic;
+      csr_instr_req              : out std_logic;
+      instr_rvalid_IE            : out std_logic;  -- validity bit at IE input
+      csr_addr_i                 : out std_logic_vector (11 downto 0);
+      csr_wdata_i                : out std_logic_vector (31 downto 0);
+      csr_op_i                   : out std_logic_vector (2 downto 0);
+      jump_instr                 : out std_logic;
+      jump_instr_lat             : out std_logic;
+      branch_instr               : out std_logic;
+      branch_instr_lat           : out std_logic;
+      harc_ID                    : out natural range THREAD_POOL_SIZE-1 downto 0;
+      harc_EXEC                  : out natural range THREAD_POOL_SIZE-1 downto 0;
+      harc_to_csr                : out natural range THREAD_POOL_SIZE_GLOBAL-1 downto 0;
+      instr_word_IE              : out std_logic_vector(31 downto 0);
+      PC_offset                  : out std_logic_vector(31 downto 0);
+      absolute_address           : out std_logic_vector(31 downto 0);
+      ebreak_instr               : out std_logic;
+      data_addr_internal         : out std_logic_vector(31 downto 0);
+      absolute_jump              : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      PC_offset_ID               : out std_logic_vector(31 downto 0);
+      set_branch_condition_ID    : out std_logic;
+      --wfi_hart_wire              : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      halt_update                : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  
+      -- clock, reset active low, test enable
+      clk_i                      : in  std_logic;
+      rst_ni                     : in  std_logic;
+      -- program memory interface
+      instr_req_o                : out std_logic;
+      instr_gnt_i                : in  std_logic;
+      instr_rvalid_i             : in  std_logic;
+      instr_rdata_i              : in  std_logic_vector(31 downto 0);
+      -- data memory interface
+      data_req_o                 : out std_logic;
+      data_gnt_i                 : in  std_logic;
+      data_rvalid_i              : in  std_logic;
+      data_we_o                  : out std_logic;
+      data_be_o                  : out std_logic_vector(3 downto 0);
+      data_addr_o                : out std_logic_vector(31 downto 0);
+      data_wdata_o               : out std_logic_vector(31 downto 0);
+      data_rdata_i               : in  std_logic_vector(31 downto 0);
+      data_err_i                 : in  std_logic;
+      -- interrupt request interface
+      irq_i                      : in  std_logic;
+      -- miscellanous control signals
+      fetch_enable_i             : in  std_logic;
+      core_busy_o                : out std_logic;
+      -- klessydra-specific signals
+      core_enable_i              : in  std_logic;
+      source_hartid_o            : out natural range THREAD_POOL_SIZE_GLOBAL-1 downto 0;
+      sw_irq                     : out std_logic_vector(THREAD_POOL_SIZE_GLOBAL-1 downto 0);
+      sw_irq_served_i            : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      sw_irq_served_o            : out std_logic_vector(THREAD_POOL_SIZE_GLOBAL-1 downto 0);
+      sw_irq_pending             : out std_logic_vector(THREAD_POOL_SIZE_GLOBAL-1 downto 0);
+      -- VCU  Signals
+      RS1_Data_IE                : out std_logic_vector(31 downto 0);
+      RS2_Data_IE                : out std_logic_vector(31 downto 0);
+      RD_Data_IE                 : out std_logic_vector(31 downto 0);  -- unused
+      state_LS                   : out fsm_LS_states
+    );
+    end component;
+  
+  component Debug
+    generic(
+      debug_en          : natural;
+      THREAD_POOL_SIZE  : natural
+    );
+    port(
+      rst_ni               : in  std_logic;
+      clk_i                : in  std_logic;
+      debug_req_i          : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      ebreak_dbg           : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      single_stepping      : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      DEBUG_MODE           : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      harc_EXEC            : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      harc_IF              : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      ebreak_instr         : in  std_logic;
+      halt_req             : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      halt_req_wire        : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      halt_served          : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      reset_state          : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      debug_havereset      : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      debug_running        : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      debug_halted         : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      state_waiting_for_halt_serv : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0); 
+      dret_instr           : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      amo_load             : in  std_logic;
+      amo_load_skip        : in  std_logic;
+      amo_store            : in  std_logic;
+      debug_pc_taken_wire  : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      debug_cause          : out debug_cause_array
     );
   end component;
 
-  component CSR_Unit
-  generic (
-    THREAD_POOL_SIZE_GLOBAL     : natural;
-    THREAD_POOL_SIZE            : natural;
-    MCYCLE_EN                   : natural;
-    MINSTRET_EN                 : natural;
-    MHPMCOUNTER_EN              : natural;
-    RF_CEIL                     : natural;
-    count_all                   : natural
-  );
-  port (
-    pc_IE                       : in  std_logic_vector(31 downto 0);
-    ie_except_data              : in  std_logic_vector(31 downto 0);
-    ls_except_data              : in  std_logic_vector(31 downto 0);
-    served_ie_except_condition  : in  std_logic_vector(harc_range);
-    served_ls_except_condition  : in  std_logic_vector(harc_range);
-    harc_EXEC                   : in  natural range THREAD_POOL_SIZE-1 downto 0;
-    harc_to_csr                 : in  natural range THREAD_POOL_SIZE_GLOBAL-1 downto 0;
-    instr_word_IE               : in  std_logic_vector(31 downto 0);
-    served_except_condition     : in  std_logic_vector(harc_range);
-    served_mret_condition       : in  std_logic_vector(harc_range);
-    served_irq                  : in  std_logic_vector(harc_range);
-    served_pending_irq          : in  std_logic_vector(harc_range);
-    pc_except_value_wire        : in  harc_vec_array;
-    data_addr_internal          : in  std_logic_vector(31 downto 0);
-    jump_instr                  : in  std_logic;
-    branch_instr                : in  std_logic;
-    set_branch_condition        : in  std_logic;
-    csr_instr_req               : in  std_logic;
-    misaligned_err              : in  std_logic;
-    WFI_Instr                   : in  std_logic;
-    csr_wdata_i                 : in  std_logic_vector(31 downto 0);
-    csr_op_i                    : in  std_logic_vector(2  downto 0);
-    csr_addr_i                  : in  std_logic_vector(11 downto 0);
-    csr_instr_done              : out std_logic;
-    csr_access_denied_o         : out std_logic;
-    csr_rdata_o                 : out std_logic_vector (31 downto 0);
-    MHARTID                     : out MHARTID_array;
-    MSTATUS                     : out MSTATUS_array;
-    MEPC                        : out harc_vec_array;
-    MCAUSE                      : out harc_vec_array;
-    MIP                         : out harc_vec_array;
-    MTVEC                       : out harc_vec_array;
-    MSCRATCH                       : out harc_vec_array;
-    PCER                        : out harc_vec_array;
-    fetch_enable_i              : in  std_logic;
-    clk_i                       : in  std_logic;
-    rst_ni                      : in  std_logic;
-    core_id_i                   : in  std_logic_vector(3 downto 0);
-    instr_rvalid_i              : in  std_logic;
-    instr_rvalid_IE             : in  std_logic;
-    data_we_o                   : in  std_logic;
-    data_req_o                  : in  std_logic;
-    data_gnt_i                  : in  std_logic;
-    irq_i                       : in  std_logic;
-    irq_id_i                    : in  std_logic_vector(4 downto 0);
-    irq_id_o                    : out std_logic_vector(4 downto 0);
-    irq_ack_o                   : out std_logic;
-    sw_irq                      : in  std_logic_vector(THREAD_POOL_SIZE_GLOBAL-1 downto 0);
-    sw_irq_pending              : in  std_logic_vector(THREAD_POOL_SIZE_GLOBAL-1 downto 0)
-    );
-  end component;
-
-  component Pipeline
-  generic(
-    THREAD_POOL_SIZE_GLOBAL    : natural;
-    THREAD_POOL_SIZE           : natural;
-    lutram_rf                  : natural;
-    latch_rf                   : natural;
-    RV32E                      : natural;
-    RV32M                      : natural;
-    superscalar_exec_en        : natural;
-    MCYCLE_EN                  : natural;
-    MINSTRET_EN                : natural;
-    MHPMCOUNTER_EN             : natural;
-    count_all                  : natural;
-    debug_en                   : natural;
-    tracer_en                  : natural;
-    -------------------------------------
-    RF_SIZE                    : natural;
-    RF_CEIL                    : natural
-    --TPS_CEIL                   : natural
-    );
-  port (
-    pc_IF                      : in  std_logic_vector(31 downto 0);
-    harc_IF                    : in  harc_range;
-    irq_pending                : in  std_logic_vector(harc_range);
-    csr_instr_done             : in  std_logic;
-    csr_access_denied_o        : in  std_logic;
-    csr_rdata_o                : in  std_logic_vector (31 downto 0);
-    MHARTID                    : in  MHARTID_array;
-    MSTATUS                    : in  MSTATUS_array;
-    PCER                       : in  harc_vec_array;
-    served_irq                 : out std_logic_vector(harc_range);
-    served_pending_irq         : out std_logic_vector(harc_range);
-    misaligned_err             : out std_logic;
-    pc_ID                      : out std_logic_vector(31 downto 0);
-    pc_IE                      : out std_logic_vector(31 downto 0);
-    ie_except_data             : out std_logic_vector(31 downto 0);
-    ls_except_data             : out std_logic_vector(31 downto 0);
-    taken_branch               : out std_logic;
-    ie_taken_branch            : out std_logic;
-    ls_taken_branch            : out std_logic;
-    set_branch_condition       : out std_logic;
-    set_except_condition       : out std_logic;        
-    ie_except_condition        : out std_logic;
-    ls_except_condition        : out std_logic;
-    set_mret_condition         : out std_logic;
-    set_wfi_condition          : out std_logic;
-    csr_instr_req              : out std_logic;
-    instr_rvalid_IE            : out std_logic;  -- validity bit at IE input
-    csr_addr_i                 : out std_logic_vector (11 downto 0);
-    csr_wdata_i                : out std_logic_vector (31 downto 0);
-    csr_op_i                   : out std_logic_vector (2 downto 0);
-    jump_instr                 : out std_logic;
-    jump_instr_lat             : out std_logic;
-    branch_instr               : out std_logic;
-    branch_instr_lat           : out std_logic;
-    harc_ID                    : out harc_range;
-    harc_EXEC                  : out natural range THREAD_POOL_SIZE-1 downto 0;
-    harc_to_csr                : out natural range THREAD_POOL_SIZE_GLOBAL-1 downto 0;
-    instr_word_IE              : out std_logic_vector(31 downto 0);
-    PC_offset                  : out std_logic_vector(31 downto 0);
-    absolute_address           : out std_logic_vector(31 downto 0);
-    ebreak_instr               : out std_logic;
-    data_addr_internal         : out std_logic_vector(31 downto 0);
-    absolute_jump              : out std_logic_vector(harc_range);
-    regfile                    : out regfile_array;
-    PC_offset_ID               : out std_logic_vector(31 downto 0);
-    set_branch_condition_ID    : out std_logic;
-    WFI_Instr                  : out std_logic;
-    -- clock, reset active low, test enable
-    clk_i                      : in  std_logic;
-    rst_ni                     : in  std_logic;
-    -- program memory interface
-    instr_req_o                : out std_logic;
-    instr_gnt_i                : in  std_logic;
-    instr_rvalid_i             : in  std_logic;
-    instr_rdata_i              : in  std_logic_vector(31 downto 0);
-    -- data memory interface
-    data_req_o                 : out std_logic;
-    data_gnt_i                 : in  std_logic;
-    data_rvalid_i              : in  std_logic;
-    data_we_o                  : out std_logic;
-    data_be_o                  : out std_logic_vector(3 downto 0);
-    data_addr_o                : out std_logic_vector(31 downto 0);
-    data_wdata_o               : out std_logic_vector(31 downto 0);
-    data_rdata_i               : in  std_logic_vector(31 downto 0);
-    data_err_i                 : in  std_logic;
-    -- interrupt request interface
-    irq_i                      : in  std_logic;
-    -- miscellanous control signals
-    fetch_enable_i             : in  std_logic;
-    core_busy_o                : out std_logic;
-    -- klessydra-specific signals
-    core_enable_i              : in  std_logic;
-    source_hartid_o            : out natural range THREAD_POOL_SIZE_GLOBAL-1 downto 0;
-    sw_irq                     : out std_logic_vector(THREAD_POOL_SIZE_GLOBAL-1 downto 0);
-    sw_irq_served_i            : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
-    sw_irq_served_o            : out std_logic_vector(THREAD_POOL_SIZE_GLOBAL-1 downto 0);
-    sw_irq_pending             : out std_logic_vector(THREAD_POOL_SIZE_GLOBAL-1 downto 0);
-    -- VCU Signals
-    RS1_Data_IE                : out std_logic_vector(31 downto 0);
-    RS2_Data_IE                : out std_logic_vector(31 downto 0);
-    RD_Data_IE                 : out std_logic_vector(31 downto 0);  -- unused
-    state_LS                   : out fsm_LS_states
-  );
-  end component;
-  
-  
 --------------------------------------------------------------------------------------------------
 ----------------------- ARCHITECTURE BEGIN -------------------------------------------------------              
 begin
+
+  --new signals for demux on instruction bus
+  instr_we_int      <= '0';
+  instr_be_int      <= "1111";
+  instr_wdata_int   <= (others => '0');
+
+  instr_we_o     <= instr_we_int;
+  instr_be_o     <= instr_be_int;
+  instr_wdata_o  <= instr_wdata_int;
+
   data_we_o <= data_we_o_int;
   data_req_o <= data_req_o_int;
 
@@ -512,6 +630,7 @@ begin
 
   Prg_Ctr : Program_Counter
     generic map (
+      debug_en                    => debug_en,
       THREAD_POOL_SIZE            => THREAD_POOL_SIZE_GEN
       )
     port map(
@@ -528,6 +647,19 @@ begin
       set_except_condition        => set_except_condition,
       set_mret_condition          => set_mret_condition,
       set_wfi_condition           => set_wfi_condition,
+      gnt_waiting                 => gnt_waiting,
+      fetch_busy_dbg              => fetch_busy_dbg,
+      DEBUG_MODE                  => DEBUG_MODE,
+      DPC                         => DPC,
+      halt_req                    => halt_req,
+      debug_pc_taken_wire         => debug_pc_taken_wire,
+      halt_served                 => halt_served,
+      reset_state                 => reset_state,
+      dm_halt_addr_i              => dm_halt_addr_i,
+      dm_exception_addr_i         => dm_exception_addr_i,
+      taken_branch_addr_out       => taken_branch_addr,
+      dret_instr                  => dret_instr,
+      state_waiting_for_halt_serv => state_waiting_for_halt_serv,
       harc_ID                     => harc_ID,
       harc_EXEC                   => harc_EXEC,
       instr_rvalid_IE             => instr_rvalid_IE,
@@ -567,6 +699,7 @@ begin
       MINSTRET_EN                 => MINSTRET_EN,
       MHPMCOUNTER_EN              => MHPMCOUNTER_EN,
       RF_CEIL                     => RF_CEIL,
+      debug_en                    => debug_en,
       count_all                   => count_all
     )
     port map(
@@ -576,6 +709,8 @@ begin
       served_ie_except_condition  => served_ie_except_condition,
       served_ls_except_condition  => served_ls_except_condition,
       harc_EXEC                   => harc_EXEC,
+      harc_ID                     => harc_ID,
+      harc_IF                     => harc_IF,
       harc_to_csr                 => harc_to_csr,
       instr_word_IE               => instr_word_IE,
       served_except_condition     => served_except_condition,
@@ -603,6 +738,21 @@ begin
       MIP                         => MIP,
       MTVEC                       => MTVEC,
       PCER                        => PCER,
+      pc_ID                       => pc_ID,
+      pc_IF                       => pc_IF,
+      DPC                         => DPC,
+      DEBUG_MODE                  => DEBUG_MODE,
+      wfi_exec                    => wfi_exec,
+      taken_branch_addr           => taken_branch_addr,
+      halt_req                    => halt_req,
+      irq_en_single_step          => irq_en_single_step,
+      single_stepping             => single_stepping,
+      debug_cause                 => debug_cause,
+      dret_instr                  => dret_instr,
+      ebreak_instr                => ebreak_instr,
+      halt_served                 => halt_served,
+      ebreak_dbg                  => ebreak_dbg,
+      taken_branch                => taken_branch,
       fetch_enable_i              => fetch_enable_i,
       clk_i                       => clk_i,
       rst_ni                      => rst_ni,
@@ -638,7 +788,6 @@ begin
       -----------------------------------
       RF_SIZE                 => RF_SIZE,
       RF_CEIL                 => RF_CEIL
-      --TPS_CEIL                => TPS_CEIL
       )
     port map(
       pc_IF                      => pc_IF,
@@ -654,6 +803,20 @@ begin
       MHARTID                    => MHARTID,
       MSTATUS                    => MSTATUS,
       PCER                       => PCER,
+      DEBUG_MODE                 => DEBUG_MODE,
+      halt_req                   => halt_req,
+      halt_req_wire              => halt_req_wire,
+      debug_pc_taken_wire        => debug_pc_taken_wire,
+      irq_en_single_step         => irq_en_single_step,
+      single_stepping            => single_stepping,
+      amo_load                   => amo_load,
+      amo_load_skip              => amo_load_skip,
+      amo_store                  => amo_store,
+      dret_instr                 => dret_instr,
+      gnt_waiting                => gnt_waiting,
+      fetch_busy_dbg             => fetch_busy_dbg,
+      wfi_exec                   => wfi_exec,
+      instr_axi_rvalid           => instr_axi_rvalid,
       served_irq                 => served_irq,
       served_pending_irq         => served_pending_irq,
       misaligned_err             => misaligned_err,
@@ -685,7 +848,6 @@ begin
       ebreak_instr               => ebreak_instr,
       data_addr_internal         => data_addr_internal,
       absolute_jump              => absolute_jump,
-      regfile                    => regfile,
       PC_offset_ID               => PC_offset_ID,
       set_branch_condition_ID    => set_branch_condition_ID,
       clk_i                      => clk_i,
@@ -717,6 +879,39 @@ begin
       RD_Data_IE                 => RD_Data_IE,
       state_LS                   => open
       );
+
+  debug_unit_gen: if debug_en = 1 generate
+    Debug_u : Debug
+      generic map(
+        debug_en                     => debug_en,
+        THREAD_POOL_SIZE             => THREAD_POOL_SIZE
+      )
+      port map(
+        rst_ni                       => rst_ni,
+        clk_i                        => clk_i,
+        debug_req_i                  => debug_req_i,
+        ebreak_dbg                   => ebreak_dbg,
+        single_stepping              => single_stepping,
+        DEBUG_MODE                   => DEBUG_MODE,
+        harc_EXEC                    => harc_EXEC,
+        harc_IF                      => harc_IF,
+        ebreak_instr                 => ebreak_instr,
+        halt_req                     => halt_req,
+        halt_req_wire                => halt_req_wire,
+        halt_served                  => halt_served,
+        reset_state                  => reset_state,
+        debug_havereset              => debug_havereset_int,
+        debug_running                => debug_running_int,
+        debug_halted                 => debug_halted_int,
+        state_waiting_for_halt_serv  => state_waiting_for_halt_serv,
+        dret_instr                   => dret_instr,
+        amo_load                     => amo_load,
+        amo_load_skip                => amo_load_skip,
+        amo_store                    => amo_store,
+        debug_pc_taken_wire          => debug_pc_taken_wire,
+        debug_cause                  => debug_cause
+      );
+  end generate debug_unit_gen;
 
 end Klessydra_M;
 --------------------------------------------------------------------------------------------------

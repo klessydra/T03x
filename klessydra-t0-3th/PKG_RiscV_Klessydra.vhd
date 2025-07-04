@@ -54,6 +54,7 @@ package riscv_klessydra is
   constant BRANCHING_DELAY_SLOT    : integer := 3;
   constant FULL_RF_SIZE            : natural := 32;
   constant BUF_SIZE                : natural := 10; --substitution for the constant defined in the architecture of the pipeline
+  constant NOP_INSTR               : std_logic_vector(31 downto 0) := x"00000013";
   --constant HARC_SIZE               : integer := THREAD_POOL_SIZE;
 
   constant SLEEP_MODE              : natural := 0;
@@ -81,6 +82,9 @@ package riscv_klessydra is
   type regfile_unit    is array (natural range FULL_RF_SIZE-1 downto 0) of std_logic_vector(31 downto 0);
   type regfile_array   is array (natural range THREAD_POOL_SIZE-1 downto 0) of regfile_unit;
   type lutram_array    is array (natural range THREAD_POOL_SIZE*FULL_RF_SIZE-1 downto 0) of std_logic_vector(31 downto 0);
+
+  type debug_cause_array is array (natural range THREAD_POOL_SIZE-1 downto 0) of std_logic_vector(2  downto 0);
+  type debug_state_array is array (natural range THREAD_POOL_SIZE-1 downto 0) of std_logic_vector(1  downto 0);
   -- Might need to add other arrays to accomodate for RV32E version if required.
 
   type fsm_IE_states is (sleep, normal, csr_instr_wait_state);
@@ -100,65 +104,66 @@ package riscv_klessydra is
 --  ╚══════╝╚═╝  ╚═╝╚══════╝ ╚═════╝    ╚═════╝ ╚══════╝╚═╝     ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝  --
 -------------------------------------------------------------------------------------------------
 
-  constant EXEC_UNIT_INSTR_SET_SIZE   : natural := 52;  -- total number of instructions in the exec unit
+  constant EXEC_UNIT_INSTR_SET_SIZE   : natural := 53;  -- total number of instructions in the exec unit
   constant LS_UNIT_INSTR_SET_SIZE     : natural := 12;  -- total number of instructions in the ld_str unit
   constant DSP_UNIT_INSTR_SET_SIZE    : natural := 17;  -- total number of instructions in the dsp unit
   constant BRANCHING_INSTR_SET_SIZE   : natural := 3;   -- total number of instructions in the dsp unit
 
 
   -- EXEC UNIT INSTR SET --------------------------------------------------------------------------------------------------------------------
-  constant ADDI_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000000000000001";
-  constant SLTI_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000000000000010";
-  constant SLTIU_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000000000000100";
-  constant ANDI_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000000000001000";
-  constant ORI_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000000000010000";
-  constant XORI_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000000000100000";
-  constant SLLI_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000000001000000";
-  constant SRLI7_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000000010000000";
-  constant SRAI7_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000000100000000";
-  constant LUI_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000001000000000";
-  constant AUIPC_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000010000000000";
-  constant ADD7_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000000100000000000";
-  constant SUB7_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000001000000000000";
-  constant SLT_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000010000000000000";
-  constant SLTU_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000000100000000000000";
-  constant ANDD_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000001000000000000000";
-  constant ORR_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000010000000000000000";
-  constant XORR_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000000100000000000000000";
-  constant SLLL_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000001000000000000000000";
-  constant SRLL7_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000010000000000000000000";
-  constant SRAA7_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000000100000000000000000000";
-  constant JAL_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000001000000000000000000000";
-  constant JALR_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000010000000000000000000000";
-  constant BEQ_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000000100000000000000000000000";
-  constant BNE_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000001000000000000000000000000";
-  constant BLT_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000010000000000000000000000000";
-  constant BLTU_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000000100000000000000000000000000";
-  constant BGE_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000001000000000000000000000000000";
-  constant BGEU_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000010000000000000000000000000000";
-  constant FENCE_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000000100000000000000000000000000000";
-  constant FENCEI_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000001000000000000000000000000000000";
-  constant ECALL_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000010000000000000000000000000000000";
-  constant EBREAK_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000000100000000000000000000000000000000";
-  constant MRET_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000001000000000000000000000000000000000";
-  constant WFI_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000010000000000000000000000000000000000";
-  constant CSRRW_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000000100000000000000000000000000000000000";
-  constant CSRRS_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000001000000000000000000000000000000000000";
-  constant CSRRC_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000010000000000000000000000000000000000000";
-  constant CSRRWI_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000000100000000000000000000000000000000000000";
-  constant CSRRSI_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000001000000000000000000000000000000000000000";
-  constant CSRRCI_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000010000000000000000000000000000000000000000";
-  constant SW_MIP_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000000100000000000000000000000000000000000000000";
-  constant ILL_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000001000000000000000000000000000000000000000000";
-  constant NOP_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000010000000000000000000000000000000000000000000";
-  constant MUL_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000000100000000000000000000000000000000000000000000";
-  constant MULH_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000001000000000000000000000000000000000000000000000";
-  constant MULHSU_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000010000000000000000000000000000000000000000000000";
-  constant MULHU_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0000100000000000000000000000000000000000000000000000";
-  constant DIV_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0001000000000000000000000000000000000000000000000000";
-  constant DIVU_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0010000000000000000000000000000000000000000000000000";
-  constant REM_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "0100000000000000000000000000000000000000000000000000";
-  constant REMU_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "1000000000000000000000000000000000000000000000000000";
+  constant ADDI_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000000000000001";
+  constant SLTI_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000000000000010";
+  constant SLTIU_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000000000000100";
+  constant ANDI_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000000000001000";
+  constant ORI_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000000000010000";
+  constant XORI_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000000000100000";
+  constant SLLI_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000000001000000";
+  constant SRLI7_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000000010000000";
+  constant SRAI7_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000000100000000";
+  constant LUI_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000001000000000";
+  constant AUIPC_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000010000000000";
+  constant ADD7_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000000100000000000";
+  constant SUB7_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000001000000000000";
+  constant SLT_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000010000000000000";
+  constant SLTU_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000000100000000000000";
+  constant ANDD_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000001000000000000000";
+  constant ORR_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000010000000000000000";
+  constant XORR_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000000100000000000000000";
+  constant SLLL_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000001000000000000000000";
+  constant SRLL7_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000010000000000000000000";
+  constant SRAA7_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000000100000000000000000000";
+  constant JAL_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000001000000000000000000000";
+  constant JALR_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000010000000000000000000000";
+  constant BEQ_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000000100000000000000000000000";
+  constant BNE_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000001000000000000000000000000";
+  constant BLT_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000010000000000000000000000000";
+  constant BLTU_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000000100000000000000000000000000";
+  constant BGE_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000001000000000000000000000000000";
+  constant BGEU_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000010000000000000000000000000000";
+  constant FENCE_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000000100000000000000000000000000000";
+  constant FENCEI_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000001000000000000000000000000000000";
+  constant ECALL_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000010000000000000000000000000000000";
+  constant EBREAK_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000000100000000000000000000000000000000";
+  constant MRET_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000001000000000000000000000000000000000";
+  constant WFI_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000010000000000000000000000000000000000";
+  constant CSRRW_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000000100000000000000000000000000000000000";
+  constant CSRRS_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000001000000000000000000000000000000000000";
+  constant CSRRC_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000010000000000000000000000000000000000000";
+  constant CSRRWI_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000000100000000000000000000000000000000000000";
+  constant CSRRSI_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000001000000000000000000000000000000000000000";
+  constant CSRRCI_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000010000000000000000000000000000000000000000";
+  constant SW_MIP_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000000100000000000000000000000000000000000000000";
+  constant ILL_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000001000000000000000000000000000000000000000000";
+  constant NOP_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000010000000000000000000000000000000000000000000";
+  constant MUL_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000000100000000000000000000000000000000000000000000";
+  constant MULH_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000001000000000000000000000000000000000000000000000";
+  constant MULHSU_pattern  : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000010000000000000000000000000000000000000000000000";
+  constant MULHU_pattern   : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00000100000000000000000000000000000000000000000000000";
+  constant DIV_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00001000000000000000000000000000000000000000000000000";
+  constant DIVU_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00010000000000000000000000000000000000000000000000000";
+  constant REM_pattern     : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "00100000000000000000000000000000000000000000000000000";
+  constant REMU_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "01000000000000000000000000000000000000000000000000000";
+  constant DRET_pattern    : std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0) := "10000000000000000000000000000000000000000000000000000";
   -------------------------------------------------------------------------------------------------------------------------------------------
 
   -- LOAD STORE UNIT INSTR SET ---------------------------------------------------------------------
@@ -254,6 +259,7 @@ package riscv_klessydra is
   constant DIVU_bit_position    : natural := 49;
   constant REM_bit_position     : natural := 50;
   constant REMU_bit_position    : natural := 51;
+  constant DRET_bit_position    : natural := 52;
 
   constant LW_bit_position       : natural := 0;
   constant LH_bit_position       : natural := 1;
@@ -382,8 +388,13 @@ package riscv_klessydra is
   constant MVTYPE_addr        : std_logic_vector (11 downto 0) := x"BF8";  -- custom CSR registers
   constant MBHARTID_addr      : std_logic_vector (11 downto 0) := x"FC4";  -- custom CSR registers
   constant MPIP_addr          : std_logic_vector (11 downto 0) := x"FC8";  -- custom CSR registers
+  -- Debug CSR addresses
+  constant DCSR_addr          : std_logic_vector (11 downto 0) := x"7B0";
+  constant DPC_addr           : std_logic_vector (11 downto 0) := x"7B1";
+  constant DSCRATCH0_addr     : std_logic_vector (11 downto 0) := x"7B2";
+  constant DSCRATCH1_addr     : std_logic_vector (11 downto 0) := x"7B3";
   -- reset values of CSR Registers
-  constant MTVEC_RESET_VALUE    : std_logic_vector(31 downto 0)          := x"80000094";
+  constant MTVEC_RESET_VALUE    : std_logic_vector(31 downto 0)          := x"00000094";
   constant MSCRATCH_RESET_VALUE : std_logic_vector(31 downto 0)          := x"00000000";
   constant PCER_RESET_VALUE     : std_logic_vector(31 downto 0)          := x"00000000";
   constant MSTATUS_RESET_VALUE  : std_logic_vector(1 downto 0)           := "00";
@@ -393,7 +404,8 @@ package riscv_klessydra is
   constant MIP_RESET_VALUE      : std_logic_vector(31 downto 0)          := x"00000000";
   --constant MVSIZE_RESET_VALUE   : std_logic_vector(Addr_Width downto 0)  := (1 to Addr_Width => '0') & '1';
   constant MVTYPE_RESET_VALUE   : std_logic_vector(3 downto 0)           := "1000";
-  constant MPSCLFAC_RESET_VALUE : std_logic_vector(4 downto 0)           := (others => '0');							  
+  constant MPSCLFAC_RESET_VALUE : std_logic_vector(4 downto 0)           := (others => '0');			
+  constant DCSR_RESET_VALUE     : std_logic_vector(31 downto 0)          := x"40000403";
 
   -- csr bits for instructions SYSTEM -> CSRRS
   --constant RDCYCLE    : std_logic_vector(11 downto 0) := "110000000000";
@@ -555,6 +567,7 @@ package riscv_klessydra is
   constant EBREAK : std_logic_vector(11 downto 0) := "000000000001";
   constant MRET   : std_logic_vector(11 downto 0) := "001100000010";
   constant WFI    : std_logic_vector(11 downto 0) := "000100000101";
+  constant DRET   : std_logic_vector(11 downto 0) := "011110110010";
 
 ----------------------------------------------------------------------------------------------------------------------------
 --  ███████╗██╗  ██╗ ██████╗███████╗██████╗ ████████╗██╗ ██████╗ ███╗   ██╗     ██████╗ ██████╗ ██████╗ ███████╗███████╗  --
@@ -579,6 +592,13 @@ package riscv_klessydra is
   constant READ_SAME_SCARTCHPAD_EXCEPT_CODE  : std_logic_vector(31 downto 0) := x"00000103"; -- Custom codes
   constant WRITE_SAME_SCARTCHPAD_EXCEPT_CODE : std_logic_vector(31 downto 0) := x"00000104"; -- Custom codes
   constant CTX_SWITCH_CODE                   : std_logic_vector(31 downto 0) := x"00000110"; -- Custom codes
+
+  -- Debug cause codes (riscv debug specification 0.13.2)
+  constant EBREAK_CAUSE_CODE                  : std_logic_vector(2 downto 0) := "001";
+  constant TRIGGER_CAUSE_CODE                 : std_logic_vector(2 downto 0) := "010";  --not implemented
+  constant HALT_REQ_CAUSE_CODE                : std_logic_vector(2 downto 0) := "011";
+  constant SINGLE_STEP_CAUSE_CODE             : std_logic_vector(2 downto 0) := "100";
+  constant RESET_HALT_REQ_CAUSE_CODE          : std_logic_vector(2 downto 0) := "101";
 
 ----------------------------------------------------------------------------------
 --  ███████╗██╗   ██╗███╗   ██╗ ██████╗████████╗██╗ ██████╗ ███╗   ██╗███████╗  --

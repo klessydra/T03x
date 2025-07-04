@@ -23,6 +23,7 @@ use work.riscv_klessydra.all;
 entity IF_STAGE is
   generic(
     THREAD_POOL_SIZE           : natural;
+    debug_en                   : natural;
     RF_CEIL                    : natural
     );
   port(
@@ -35,6 +36,12 @@ entity IF_STAGE is
     pc_ID                      : out std_logic_vector(31 downto 0);  -- pc_ID is PC entering ID stage
     instr_rvalid_ID            : out std_logic; 
     instr_word_ID              : out std_logic_vector(31 downto 0);
+    -----------------------------------------------------------------------------
+    instr_axi_rvalid           : in  std_logic;
+    fetch_busy_dbg             : out std_logic;
+    debug_pc_taken_wire        : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    gnt_waiting                : out std_logic;
+    -----------------------------------------------------------------------------
     rs1_valid_ID               : out std_logic;
     rs2_valid_ID               : out std_logic;
     rd_valid_ID                : out std_logic;
@@ -74,6 +81,14 @@ architecture FETCH of IF_STAGE is
   signal rd_valid_ID_lat         : std_logic;
   signal rd_read_valid_ID_lat    : std_logic;
 
+  signal is_debug_address        : std_logic;
+  signal fetch_busy_dbg_int      : std_logic;
+
+  signal gnt_waiting_int              : std_logic;
+  signal instr_req_halt               : std_logic;
+  signal rvalid_lat       : std_logic;
+  signal instr_rdata_lat  : std_logic_vector(31 downto 0);
+
   function rs1 (signal instr : in std_logic_vector(31 downto 0)) return integer is
   begin
     return to_integer(unsigned(instr(15+(RF_CEIL-1) downto 15)));
@@ -102,28 +117,88 @@ begin
 -- The PC_IF is updated by a dedicated unit which is transparent to the fsm_IF.
 ----------------------------------------------------------------------------------------------------
 
-
-  instr_req_o <= not busy_ID;
-
-  process(clk_i, rst_ni)
-  begin
-    if rising_edge(clk_i) then
-      if instr_gnt_i = '1' then
-        pc_ID   <= pc_IF;
-        harc_ID <= harc_IF;
+  debug_fetch_nen: if debug_en = 0 generate
+    instr_req_o <= not busy_ID;
+  
+    process(clk_i, rst_ni)
+    begin
+      if rising_edge(clk_i) then
+        if instr_gnt_i = '1' then
+          pc_ID   <= pc_IF;
+          harc_ID <= harc_IF;
+        end if;
+        if instr_rvalid_i = '1' then 
+          instr_word_ID_lat <= instr_rdata_i;
+        end if;
       end if;
-      if instr_rvalid_i = '1' then 
-        instr_word_ID_lat <= instr_rdata_i;
+    end process;
+  
+    instr_rvalid_ID <= instr_rvalid_i;
+    instr_word_ID   <= instr_rdata_i when instr_rvalid_i = '1' else instr_word_ID_lat;
+  end generate debug_fetch_nen;
+
+  debug_fetch_en: if debug_en = 1 generate
+    is_debug_address     <= '1' when (pc_IF(31 downto 26) = "000111")
+                          else '0';
+
+    fetch_busy_dbg_int   <= '1' when (is_debug_address = '1' and instr_axi_rvalid = '0') 
+                          else '0';
+
+    fetch_busy_dbg       <= fetch_busy_dbg_int;
+    gnt_waiting          <= gnt_waiting_int;
+    instr_req_o          <= (not busy_ID) and (not instr_req_halt) and (not debug_pc_taken_wire(harc_IF));
+
+    process(clk_i, rst_ni)
+    begin
+      if rst_ni = '0' then
+        gnt_waiting_int             <= '0';
+        instr_req_halt              <= '0';
+        rvalid_lat      <= '0';
+        instr_rdata_lat <= (others => '0');
+      elsif rising_edge(clk_i) then
+        
+        if (instr_gnt_i = '1' and fetch_busy_dbg_int = '0') or (gnt_waiting_int = '1' and instr_axi_rvalid = '1') then
+          pc_ID   <= pc_IF;
+          harc_ID <= harc_IF;
+        end if;
+        
+        if instr_rvalid_i = '1' and gnt_waiting_int = '0' then
+          instr_word_ID_lat <= instr_rdata_i;
+        elsif rvalid_lat = '1' then
+          instr_word_ID_lat <= instr_rdata_lat;
+        end if;
+        
+        if fetch_busy_dbg_int = '1' and instr_gnt_i = '1' then
+          gnt_waiting_int <= '1';
+        elsif fetch_busy_dbg_int = '0' then
+          gnt_waiting_int <= '0';
+        end if;
+        
+        if (is_debug_address = '1' and instr_axi_rvalid = '1') then 
+          rvalid_lat      <= '1';
+          instr_rdata_lat <= instr_rdata_i;
+        elsif is_debug_address = '0' then
+          rvalid_lat      <= '0';
+          instr_rdata_lat <= (others => '0');
+        end if;
+  
+        if fetch_busy_dbg_int = '1' and busy_ID = '0' then
+          instr_req_halt <= '1';
+        else 
+          instr_req_halt <= '0';
+        end if;
       end if;
-    end if;
-  end process;
-
-  instr_rvalid_ID <= instr_rvalid_i;
-  instr_word_ID   <= instr_rdata_i when instr_rvalid_i = '1' else instr_word_ID_lat;
-
+    end process;
+  
+    instr_rvalid_ID <= '1' when rvalid_lat = '1'
+                          else instr_rvalid_i;
+  
+    instr_word_ID   <= instr_rdata_lat when rvalid_lat = '1'
+                        else instr_rdata_i         when (instr_rvalid_i = '1') and (gnt_waiting_int = '0')
+                        else instr_word_ID_lat;
+  end generate debug_fetch_en;
 --------------------------------------------------------------------- end of IF stage -------------
 ---------------------------------------------------------------------------------------------------
-
 end FETCH;
 --------------------------------------------------------------------------------------------------
 -- END of IE architecture ------------------------------------------------------------------------

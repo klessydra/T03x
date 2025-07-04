@@ -51,6 +51,22 @@ entity Pipeline is
     MHARTID                    : in  MHARTID_array;
     MSTATUS                    : in  MSTATUS_array;
     PCER                       : in  harc_vec_array;
+    --------------------------------------------------------------------------------
+    DEBUG_MODE                 : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    halt_req                   : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    halt_req_wire              : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    debug_pc_taken_wire        : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    irq_en_single_step         : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    single_stepping            : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    amo_load                   : out  std_logic;
+    amo_load_skip              : out  std_logic;
+    amo_store                  : out std_logic;
+    dret_instr                 : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    gnt_waiting                : out std_logic;
+    fetch_busy_dbg             : out std_logic;
+    wfi_exec                   : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    instr_axi_rvalid           : in  std_logic;
+    --------------------------------------------------------------------------------
     served_irq                 : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
     served_pending_irq         : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
     WFI_Instr                  : out std_logic;
@@ -86,7 +102,6 @@ entity Pipeline is
     ebreak_instr               : out std_logic;
     data_addr_internal         : out std_logic_vector(31 downto 0);
     absolute_jump              : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
-    regfile                    : out regfile_array;
     PC_offset_ID               : out std_logic_vector(31 downto 0);
     set_branch_condition_ID    : out std_logic;
     --wfi_hart_wire              : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
@@ -198,9 +213,6 @@ architecture Pipe of Pipeline is
   signal decoded_instruction_LS  : std_logic_vector(LS_UNIT_INSTR_SET_SIZE-1 downto 0);
 
   signal zero_rd                : std_logic;
-  signal amo_load_skip          : std_logic;
-  signal amo_load               : std_logic;
-  signal amo_store              : std_logic;
   signal load_op                : std_logic;
   signal store_op               : std_logic;
   --signal sw_mip                 : std_logic;
@@ -288,6 +300,14 @@ architecture Pipe of Pipeline is
   signal set_except_condition_int    : std_logic;
   signal state_LS_int                : fsm_LS_states;
 
+  signal amo_load_int                : std_logic;
+  signal amo_load_skip_int           : std_logic;
+  signal amo_store_int               : std_logic;
+  signal dret_instr_int              : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+  signal gnt_waiting_int             : std_logic;
+  signal fetch_busy_dbg_int          : std_logic;
+  signal wfi_exec_int                : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+
 
   function rs1 (signal instr : in std_logic_vector(31 downto 0)) return integer is
   begin
@@ -305,110 +325,124 @@ architecture Pipe of Pipeline is
   end;
 
   component IF_STAGE is
-  generic(
-    RF_CEIL                    : natural;
-    THREAD_POOL_SIZE           : natural
-    );
-  port (
-    pc_IF                      : in  std_logic_vector(31 downto 0);
-    busy_ID                    : in  std_logic;  
-    instr_rvalid_i             : in  std_logic;
-    served_irq                 : in  std_logic_vector(harc_range);
-    harc_IF                    : in  natural range THREAD_POOL_SIZE-1 downto 0;
-    harc_ID                    : out natural range THREAD_POOL_SIZE-1 downto 0;
-    pc_ID                      : out std_logic_vector(31 downto 0);  -- pc_ID is PC entering ID stage
-    instr_rvalid_ID            : out std_logic;
-    instr_word_ID              : out std_logic_vector(31 downto 0);
-    rs1_valid_ID               : out std_logic;
-    rs2_valid_ID               : out std_logic;
-    rd_valid_ID                : out std_logic;
-    rd_read_valid_ID           : out std_logic;
-    instr_rvalid_IE            : in  std_logic;
-    pc_IE                      : in  std_logic_vector(31 downto 0);
-    -- branch related signals
-    absolute_jump              : in  std_logic_vector(harc_range);
-    -- clock, reset active low
-    clk_i                      : in  std_logic;
-    rst_ni                     : in  std_logic;
-    -- program memory interface
-    instr_req_o                : out std_logic;
-    instr_gnt_i                : in  std_logic;
-    instr_rdata_i              : in  std_logic_vector(31 downto 0);
-    core_enable_i              : in  std_logic
-  );
+    generic(
+      THREAD_POOL_SIZE           : natural;
+      debug_en                   : natural;
+      RF_CEIL                    : natural
+      );
+    port(
+      pc_IF                      : in  std_logic_vector(31 downto 0);
+      busy_ID                    : in  std_logic;
+      instr_rvalid_i             : in  std_logic;
+      served_irq                 : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      harc_IF                    : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      harc_ID                    : out natural range THREAD_POOL_SIZE-1 downto 0;
+      pc_ID                      : out std_logic_vector(31 downto 0);  -- pc_ID is PC entering ID stage
+      instr_rvalid_ID            : out std_logic; 
+      instr_word_ID              : out std_logic_vector(31 downto 0);
+      -----------------------------------------------------------------------------
+      instr_axi_rvalid           : in  std_logic;
+      fetch_busy_dbg             : out std_logic;
+      debug_pc_taken_wire        : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      gnt_waiting                : out std_logic;
+      -----------------------------------------------------------------------------
+      rs1_valid_ID               : out std_logic;
+      rs2_valid_ID               : out std_logic;
+      rd_valid_ID                : out std_logic;
+      rd_read_valid_ID           : out std_logic;
+      instr_rvalid_IE            : in  std_logic;
+      pc_IE                      : in  std_logic_vector(31 downto 0);
+      -- branch related signals
+      absolute_jump              : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      -- clock, reset active low
+      clk_i                      : in  std_logic;
+      rst_ni                     : in  std_logic;
+      -- program memory interface
+      instr_req_o                : out std_logic;
+      instr_gnt_i                : in  std_logic;
+      instr_rdata_i              : in  std_logic_vector(31 downto 0);
+      core_enable_i              : in  std_logic
+      );
   end component; --------------------------------------------------
 
   component ID_STAGE is
-  generic(
-    THREAD_POOL_SIZE           : natural;
-    RV32M                      : natural;
-    superscalar_exec_en        : natural;
-    RF_CEIL                    : natural;
-    RF_SIZE                    : natural
-    );
-  port (
-  -- Branch Control Signals
-    comparator_en              : out std_logic;
-    ls_instr_req               : out std_logic;
-    ie_instr_req               : out std_logic;
-    decoded_instruction_IE     : out std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0);
-    decoded_instruction_LS     : out std_logic_vector(LS_UNIT_INSTR_SET_SIZE-1 downto 0);
-    data_be_ID                 : out std_logic_vector(3 downto 0);
-    data_width_ID              : out std_logic_vector(1 downto 0);
-    amo_store                  : in  std_logic;
-    amo_load                   : out std_logic;
-    amo_load_skip              : out std_logic;
-    load_op                    : out std_logic;
-    store_op                   : out std_logic;
-    instr_word_IE              : out std_logic_vector(31 downto 0);
-    MSTATUS                    : in  MSTATUS_array;
-    harc_ID                    : in  natural range THREAD_POOL_SIZE-1 downto 0;
-    pc_ID                      : in  std_logic_vector(31 downto 0);  -- pc_ID is PC entering ID stage
-    rs1_valid_ID               : in  std_logic;
-    rs2_valid_ID               : in  std_logic;
-    rd_valid_ID                : in  std_logic;
-    rd_read_valid_ID           : in  std_logic;
-    core_busy_IE               : in  std_logic;
-    core_busy_LS               : in  std_logic;
-    busy_LS                    : in  std_logic;
-    busy_ID                    : out std_logic;
-    ls_parallel_exec           : out std_logic;
-    pc_IE                      : out std_logic_vector(31 downto 0);  -- pc_IE is pc entering stage IE ***
-    WB_EN_next_ID              : out std_logic;
-    instr_rvalid_ID            : in  std_logic; 
-    instr_rvalid_IE            : out std_logic;  -- validity bit at IE input
-    instr_rvalid_ID_int        : out std_logic;
-    halt_IE                    : out std_logic;
-    halt_LSU                   : out std_logic;
-    instr_word_ID              : in  std_logic_vector(31 downto 0);
-    absolute_jump              : in  std_logic_vector(harc_range);
-    harc_LS_WB                 : in  natural range THREAD_POOL_SIZE-1 downto 0;
-    harc_IE_WB                 : in  natural range THREAD_POOL_SIZE-1 downto 0;
-    LS_WB_EN                   : in  std_logic;
-    IE_WB_EN                   : in  std_logic;
-    MUL_WB_EN                  : in  std_logic;
-    LS_WB_EN_wire              : in  std_logic;
-    IE_WB_EN_wire              : in  std_logic;
-    MUL_WB_EN_wire             : in  std_logic;
-    instr_word_LS_WB           : in  std_logic_vector(31 downto 0);
-    instr_word_IE_WB           : in  std_logic_vector(31 downto 0);
-    set_except_condition       : in  std_logic;
-    served_irq                 : in  std_logic_vector(harc_range);
-    --sw_mip                     : out std_logic;
-    signed_op                  : out std_logic;
-    harc_EXEC                  : out natural range THREAD_POOL_SIZE-1 downto 0;
-    harc_WB                    : in  natural range THREAD_POOL_SIZE-1 downto 0;
-    PC_offset_ID               : out std_logic_vector(31 downto 0);
-    set_branch_condition_ID    : out std_logic;
-    zero_rd                    : out std_logic;
-    -- clock, reset active low
-    clk_i                      : in  std_logic;
-    rst_ni                     : in  std_logic
-    );
+    generic(
+      THREAD_POOL_SIZE           : natural;
+      RV32M                      : natural;
+      superscalar_exec_en        : natural;
+      debug_en                   : natural;
+      RF_SIZE                    : natural;
+      RF_CEIL                    : natural
+      );
+    port (
+    -- Branch Control Signals
+      comparator_en              : out std_logic;
+      ls_instr_req               : out std_logic;
+      ie_instr_req               : out std_logic;
+      decoded_instruction_IE     : out std_logic_vector(EXEC_UNIT_INSTR_SET_SIZE-1 downto 0);
+      decoded_instruction_LS     : out std_logic_vector(LS_UNIT_INSTR_SET_SIZE-1 downto 0);
+      data_be_ID                 : out std_logic_vector(3 downto 0);
+      data_width_ID              : out std_logic_vector(1 downto 0);
+      amo_store                  : in  std_logic;
+      amo_load                   : out std_logic;
+      amo_load_skip              : out std_logic;
+      load_op                    : out std_logic;
+      store_op                   : out std_logic;
+      instr_word_IE              : out std_logic_vector(31 downto 0);
+      MSTATUS                    : in  MSTATUS_array;
+      harc_ID                    : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      --Debug signals added-----------------------------------------------------------
+      debug_pc_taken_wire        : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      fetch_busy_dbg             : in  std_logic;
+      halt_req                   : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      halt_req_wire              : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      --------------------------------------------------------------------------------
+      pc_ID                      : in  std_logic_vector(31 downto 0);  -- pc_ID is PC entering ID stage
+      rs1_valid_ID               : in  std_logic;
+      rs2_valid_ID               : in  std_logic;
+      rd_valid_ID                : in  std_logic;
+      rd_read_valid_ID           : in  std_logic;
+      core_busy_IE               : in  std_logic;
+      core_busy_LS               : in  std_logic;
+      busy_LS                    : in  std_logic;
+      busy_ID                    : out std_logic;
+      ls_parallel_exec           : out std_logic;
+      pc_IE                      : out std_logic_vector(31 downto 0);  -- pc_IE is pc entering stage IE ***
+      WB_EN_next_ID              : out std_logic;
+      instr_rvalid_ID            : in  std_logic; 
+      instr_rvalid_IE            : out std_logic;  -- validity bit at IE input
+      instr_rvalid_ID_int        : out std_logic;
+      halt_IE                    : out std_logic;
+      halt_LSU                   : out std_logic;
+      instr_word_ID              : in  std_logic_vector(31 downto 0);
+      set_except_condition       : in  std_logic;
+      served_irq                 : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      signed_op                  : out std_logic;
+      harc_EXEC                  : out natural range THREAD_POOL_SIZE-1 downto 0;
+      harc_WB                    : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      absolute_jump              : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      harc_LS_WB                 : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      harc_IE_WB                 : in  natural range THREAD_POOL_SIZE-1 downto 0;
+      LS_WB_EN                   : in  std_logic;
+      IE_WB_EN                   : in  std_logic;
+      MUL_WB_EN                  : in  std_logic;
+      LS_WB_EN_wire              : in  std_logic;
+      IE_WB_EN_wire              : in  std_logic;
+      MUL_WB_EN_wire             : in  std_logic;
+      instr_word_LS_WB           : in  std_logic_vector(31 downto 0);
+      instr_word_IE_WB           : in  std_logic_vector(31 downto 0);
+      PC_offset_ID               : out std_logic_vector(31 downto 0);
+      set_branch_condition_ID    : out std_logic;
+      zero_rd                    : out std_logic;
+      -- clock, reset active low
+      clk_i                      : in  std_logic;
+      rst_ni                     : in  std_logic
+      );
   end component; ------------------------------------------
 
   component Load_Store_Unit is
   generic(
+      debug_en                  : natural;
       THREAD_POOL_SIZE          : natural
       );
   port (
@@ -432,6 +466,9 @@ architecture Pipe of Pipeline is
     --sw_mip                     : in  std_logic;
     core_busy_LS               : out std_logic;
     busy_LS                    : out std_logic;
+    -- Debug Signals
+    halt_req_wire              : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    halt_req                   : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
     -- Processing Pipeline Signals
     halt_LSU                   : in  std_logic;
     data_addr_internal         : out std_logic_vector(31 downto 0);
@@ -467,6 +504,7 @@ architecture Pipe of Pipeline is
   generic(
     THREAD_POOL_SIZE_GLOBAL   : natural;
     THREAD_POOL_SIZE          : natural;
+    debug_en                  : natural;
     RV32M                     : natural;
     RF_CEIL                   : natural
   );
@@ -505,6 +543,14 @@ architecture Pipe of Pipeline is
     ie_instr_req              : in  std_logic;
     MHARTID                   : in  MHARTID_array;
     MSTATUS                   : in  MSTATUS_array;
+    single_stepping           : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    DEBUG_MODE                : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    wfi_exec                  : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0); 
+    halt_req_wire             : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    halt_req                  : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    irq_en_single_step        : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    debug_pc_taken_wire       : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    dret_instr                : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0); 
     harc_EXEC                 : in  natural range THREAD_POOL_SIZE-1 downto 0;
     instr_rvalid_IE           : in  std_logic;  -- validity bit at IE input
     WB_EN_next_ID             : in  std_logic;
@@ -593,8 +639,7 @@ architecture Pipe of Pipeline is
     RS1_Data_IE                : out std_logic_vector(31 downto 0);
     RS2_Data_IE                : out std_logic_vector(31 downto 0);
     RD_Data_IE                 : out std_logic_vector(31 downto 0);
-    data_addr_internal_IE      : out std_logic_vector(31 downto 0);
-    regfile                    : out regfile_array
+    data_addr_internal_IE      : out std_logic_vector(31 downto 0)
   );
   end component;
   
@@ -622,6 +667,16 @@ begin
   ie_except_condition <= ie_except_condition_int;
   set_except_condition <= set_except_condition_int;
   taken_branch <= taken_branch_int;
+
+  debug_sig_ass: if debug_en = 1 generate 
+    amo_load        <= amo_load_int;
+    amo_load_skip   <= amo_load_skip_int;
+    amo_store       <= amo_store_int;
+    dret_instr      <= dret_instr_int;
+    gnt_waiting     <= gnt_waiting_int;
+    fetch_busy_dbg  <= fetch_busy_dbg_int;
+    wfi_exec        <= wfi_exec_int;
+  end generate debug_sig_ass;
 
 
   -- Klessydra T13 (4 stages) pipeline implementation -----------------------
@@ -664,6 +719,7 @@ begin
   FETCH : IF_STAGE
   generic map(
     THREAD_POOL_SIZE           => THREAD_POOL_SIZE,
+    debug_en                   => debug_en,
     RF_CEIL                    => RF_CEIL
     )
   port map(
@@ -676,6 +732,10 @@ begin
     pc_ID                      => pc_ID_int,
     instr_rvalid_ID            => instr_rvalid_ID,
     instr_word_ID              => instr_word_ID,
+    instr_axi_rvalid           => instr_axi_rvalid,
+    fetch_busy_dbg             => fetch_busy_dbg_int,
+    debug_pc_taken_wire        => debug_pc_taken_wire,
+    gnt_waiting                => gnt_waiting_int,
     rs1_valid_ID               => rs1_valid_ID, 
     rs2_valid_ID               => rs2_valid_ID, 
     rd_valid_ID                => rd_valid_ID, 
@@ -696,6 +756,7 @@ begin
     RV32M                      => RV32M,
     THREAD_POOL_SIZE           => THREAD_POOL_SIZE,
     superscalar_exec_en        => superscalar_exec_en,
+    debug_en                   => debug_en,
     RF_CEIL                    => RF_CEIL,
     RF_SIZE                    => RF_SIZE
     )
@@ -707,14 +768,18 @@ begin
     decoded_instruction_LS     => decoded_instruction_LS, 
     data_be_ID                 => data_be_ID,
     data_width_ID              => data_width_ID,
-    amo_store                  => amo_store,
-    amo_load                   => amo_load,
-    amo_load_skip              => amo_load_skip,
+    amo_store                  => amo_store_int,
+    amo_load                   => amo_load_int,
+    amo_load_skip              => amo_load_skip_int,
     load_op                    => load_op,
     store_op                   => store_op,      
     instr_word_IE              => instr_word_ie_int,
     MSTATUS                    => MSTATUS,
     harc_ID                    => harc_ID_int,
+    debug_pc_taken_wire        => debug_pc_taken_wire,
+    fetch_busy_dbg             => fetch_busy_dbg_int,
+    halt_req                   => halt_req,
+    halt_req_wire              => halt_req_wire,
     pc_ID                      => pc_ID_int,
     rs1_valid_ID               => rs1_valid_ID,
     rs2_valid_ID               => rs2_valid_ID,
@@ -759,6 +824,7 @@ begin
 
   LSU : Load_Store_Unit
   generic map(
+    debug_en                   => debug_en,
     THREAD_POOL_SIZE           => THREAD_POOL_SIZE
     )
   port map(
@@ -780,14 +846,16 @@ begin
     --sw_mip                     => sw_mip,
     core_busy_LS               => core_busy_LS,               
     busy_LS                    => busy_LS,
+    halt_req_wire              => halt_req_wire,
+    halt_req                   => halt_req,
     halt_LSU                   => halt_LSU,
     data_addr_internal         => data_addr_internal, 
     ls_except_data             => ls_except_data,  
     ls_except_condition        => ls_except_condition,        
     ls_taken_branch            => ls_taken_branch_int,
-    amo_load                   => amo_load,              
-    amo_load_skip              => amo_load_skip,         
-    amo_store                  => amo_store,    
+    amo_load                   => amo_load_int,              
+    amo_load_skip              => amo_load_skip_int,         
+    amo_store                  => amo_store_int,    
     misaligned_err             => misaligned_err,
     state_LS                   => state_LS_int,
     LS_WB_EN                   => LS_WB_EN,
@@ -810,6 +878,7 @@ begin
   generic map(
     THREAD_POOL_SIZE           => THREAD_POOL_SIZE,
     THREAD_POOL_SIZE_GLOBAL    => THREAD_POOL_SIZE_GLOBAL,
+    debug_en                   => debug_en,
     RV32M                      => RV32M,
     RF_CEIL                    => RF_CEIL
   )
@@ -848,6 +917,14 @@ begin
     ie_instr_req               => ie_instr_req,
     MHARTID                    => MHARTID,
     MSTATUS                    => MSTATUS,
+    single_stepping            => single_stepping, 
+    DEBUG_MODE                 => DEBUG_MODE,
+    wfi_exec                   => wfi_exec_int,
+    halt_req_wire              => halt_req_wire,
+    halt_req                   => halt_req,
+    irq_en_single_step         => irq_en_single_step,
+    debug_pc_taken_wire        => debug_pc_taken_wire,
+    dret_instr                 => dret_instr_int,
     harc_EXEC                  => harc_exec_int,
     instr_rvalid_IE            => instr_rvalid_IE_int,
     WB_EN_next_ID              => WB_EN_next_ID,
@@ -936,8 +1013,7 @@ begin
     RS1_Data_IE                => rs1_data_ie_int,
     RS2_Data_IE                => rs2_data_ie_int,
     RD_Data_IE                 => RD_Data_IE_int,
-    data_addr_internal_IE      => data_addr_internal_IE,
-    regfile                    => regfile
+    data_addr_internal_IE      => data_addr_internal_IE
   );
   
   ---------------------------------------------------------
@@ -950,958 +1026,958 @@ begin
   ---------------------------------------------------------
 
   -- pragma translate_off
-  Tracer_generate : if tracer_en = 1 generate
-  Tracer_sync : process(clk_i, rst_ni) -- also implements the delay slot counters and some aux signals
-    --alias ie_instr_req_a     is <<signal .tb.top_i.core_region_i.CORE.RISCV_CORE.T13_inst.Pipe.DECODE.ie_instr_req : std_logic>>;
-    --alias core_busy_IE_lat_a is <<signal .tb.top_i.core_region_i.CORE.RISCV_CORE.T13_inst.Pipe.EXECUTE.core_busy_IE_lat : std_logic>>;
-    --alias irq_pending_a      is <<signal .tb.top_i.core_region_i.CORE.RISCV_CORE.T13_inst.Prg_Ctr.irq_pending : std_logic_vector(harc_range)>>;
-    file     trace_o    : text;
-    variable file_state : fstate_arr := (others => closed); -- AAA decide whether to put this inside a reset state where the trace is reset everytime (consider FT processors that always reset the failed tests)
-    variable row        : line;
-    variable row0       : line;
-  begin
-    if rst_ni = '0' then
-    elsif rising_edge(clk_i) then
-
-      ----------------------------------------------------------------
-      --  ██╗███████╗    ████████╗██████╗  █████╗  ██████╗███████╗  --
-      --  ██║██╔════╝    ╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝  --
-      --  ██║█████╗         ██║   ██████╔╝███████║██║     █████╗    --
-      --  ██║██╔══╝         ██║   ██╔══██╗██╔══██║██║     ██╔══╝    --
-      --  ██║███████╗       ██║   ██║  ██║██║  ██║╚██████╗███████╗  --
-      --  ╚═╝╚══════╝       ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝  --
-      ----------------------------------------------------------------
-
-      case state_IE is -- stage state
-        when normal =>
-          if  ie_instr_req = '0' and core_busy_IE_lat = '0' then
-          elsif irq_pending(harc_EXEC_int) = '1' then
-          else
-            -- EXECUTE OF INSTRUCTION -------------------------------------------
-            if (decoded_instruction_IE(SW_MIP_bit_position) = '1') then
-              if (data_addr_internal_IE(31 downto 8) = x"0000FF") then -- checks that the instruction is not a store
-                write(row0, "   " & to_string(now, ns) & "  ");  --Add a timestamp to line
-                write(row0, ht);
-                hwrite(row0, pc_IE_int);
-                write(row0, string'("_"));
-                hwrite(row0, instr_word_IE_int); 
-              end if;
-            else
-              write(row0, "   " & to_string(now, ns) & "  ");  --Add a timestamp to line
-              write(row0, ht);
-              hwrite(row0, pc_IE_int);
-              write(row0, string'("_"));
-              hwrite(row0, instr_word_IE_int); 
-            end if;
-
-            if decoded_instruction_IE(ADDI_bit_position) = '1' then
-              write(row0, string'("    addi x"));
-            end if;
-
-            if decoded_instruction_IE(SLTI_bit_position) = '1' then
-              write(row0, string'("    slti x"));
-            end if;
-
-            if decoded_instruction_IE(SLTIU_bit_position) = '1' then
-              write(row0, string'("    sltiu x"));
-            end if;
-
-            if decoded_instruction_IE(ANDI_bit_position) = '1' then
-              write(row0, string'("    andi x"));
-            end if;
-
-            if decoded_instruction_IE(ORI_bit_position) = '1' then
-              write(row0, string'("    ori x"));
-            end if;
-
-            if decoded_instruction_IE(XORI_bit_position) = '1' then
-              write(row0, string'("    xori x"));
-            end if;
-
-            if decoded_instruction_IE(SLLI_bit_position) = '1' then
-              write(row0, string'("    slli x"));
-            end if;
-
-            if decoded_instruction_IE(SRLI7_bit_position) = '1' then
-              write(row0, string'("    srli x"));
-            end if;
-
-            if decoded_instruction_IE(SRAI7_bit_position) = '1' then
-              write(row0, string'("    srai x"));
-            end if;
-
-            if   decoded_instruction_IE(ADDI_bit_position)  = '1' or decoded_instruction_IE(SLTI_bit_position)  = '1'
-              or decoded_instruction_IE(SLTIU_bit_position) = '1' or decoded_instruction_IE(ANDI_bit_position)  = '1'
-              or decoded_instruction_IE(ORI_bit_position)   = '1' or decoded_instruction_IE(XORI_bit_position)  = '1'
-              or decoded_instruction_IE(SLLI_bit_position)  = '1' or decoded_instruction_IE(SRLI7_bit_position) = '1'
-              or decoded_instruction_IE(SRAI7_bit_position) = '1' then
-              write(row0, rd(instr_word_IE_int));
-              write(row0, string'(",x"));
-              write(row0, rs1(instr_word_IE_int));
-              write(row0, string'(",0x"));
-              hwrite(row0, I_imm(instr_word_IE_int));
-              write(row0, ht);
-              write(row0, ht);
-              write(row0, string'("rs1=0x"));
-              hwrite(row0, RS1_Data_IE_int);
-              write(row0, string'("      new_rd=0x"));
-              hwrite(row0, tracer_result);
-            end if;
-
-            if decoded_instruction_IE(LUI_bit_position) = '1' then
-              write(row0, string'("    lui x"));
-              write(row0, rd(instr_word_IE_int));
-              write(row0, string'(",0x"));
-              hwrite(row0, U_imm(instr_word_IE_int));
-              write(row0, ht);
-              write(row0, ht);
-              write(row0, string'("      new_rd=0x"));
-              hwrite(row0, tracer_result);
-            end if;
-
-            if decoded_instruction_IE(AUIPC_bit_position) = '1' then
-              write(row0, string'("    auipc x"));
-              write(row0, rd(instr_word_IE_int));
-              write(row0, string'(",0x"));
-              hwrite(row0, U_imm(instr_word_IE_int));
-              write(row0, ht);
-              write(row0, ht);
-              write(row0, string'("      new_rd=0x"));
-              hwrite(row0, tracer_result);
-            end if;
-
-            if decoded_instruction_IE(ADD7_bit_position) = '1' then
-              write(row0, string'("    add x"));
-            end if;
-
-            if decoded_instruction_IE(SUB7_bit_position) = '1' then
-              write(row0, string'("    sub x"));
-            end if;
-
-            if decoded_instruction_IE(SLT_bit_position) = '1' then
-              write(row0, string'("    slt x"));
-            end if;
-
-            if decoded_instruction_IE(SLTU_bit_position) = '1' then
-              write(row0, string'("    sltu x"));
-            end if;
-
-            if decoded_instruction_IE(ANDD_bit_position) = '1' then
-              write(row0, string'("    and x"));
-            end if;
-
-            if decoded_instruction_IE(ORR_bit_position) = '1' then
-              write(row0, string'("    or x"));
-            end if;
-
-            if decoded_instruction_IE(XORR_bit_position) = '1' then
-              write(row0, string'("    xor x"));
-            end if;
-
-            if decoded_instruction_IE(SLLL_bit_position) = '1' then
-              write(row0, string'("    sll x"));
-            end if;
-
-            if decoded_instruction_IE(SRLL7_bit_position) = '1' then
-              write(row0, string'("    srl x"));
-            end if;
-
-            if decoded_instruction_IE(SRAA7_bit_position) = '1' then
-              write(row0, string'("    sra x"));
-            end if;
-
-            if   decoded_instruction_IE(ADD7_bit_position)  = '1' or decoded_instruction_IE(SUB7_bit_position)  = '1'
-              or decoded_instruction_IE(SLT_bit_position)   = '1' or decoded_instruction_IE(SLTU_bit_position)  = '1'
-              or decoded_instruction_IE(ANDD_bit_position)  = '1' or decoded_instruction_IE(ORR_bit_position)   = '1'
-              or decoded_instruction_IE(XORR_bit_position)  = '1' or decoded_instruction_IE(SLLL_bit_position)  = '1'
-              or decoded_instruction_IE(SRLL7_bit_position) = '1' or decoded_instruction_IE(SRAA7_bit_position) = '1' then
-              write(row0, rd(instr_word_IE_int));
-              write(row0, string'(",x"));
-              write(row0, rs1(instr_word_IE_int));
-              write(row0, string'(",x"));
-              write(row0, rs2(instr_word_IE_int));
-              write(row0, ht);
-              write(row0, ht);
-              write(row0, string'("rs1=0x"));
-              hwrite(row0, RS1_Data_IE_int);
-              write(row0, string'("      rs2=0x"));
-              hwrite(row0, RS2_Data_IE_int);
-              write(row0, string'("      new_rd=0x"));
-              hwrite(row0, tracer_result);            end if;
-
-            if decoded_instruction_IE(JAL_bit_position) = '1' then
-              write(row0, string'("    jal x"));
-              write(row0, rd(instr_word_IE_int));
-              write(row0, string'(",0x"));
-              hwrite(row0, UJ_imm(instr_word_IE_int));
-              write(row0, ht);
-              write(row0, ht);
-              write(row0, string'("next_pc="));
-              hwrite(row0, tracer_result);
-            end if;
-
-            if decoded_instruction_IE(JALR_bit_position) = '1' then
-              write(row0, string'("    jalr x"));
-              write(row0, rd(instr_word_IE_int));
-              write(row0, string'(",x"));
-              write(row0, rs1(instr_word_IE_int));
-              write(row0, string'(",0x"));
-              hwrite(row0, I_imm(instr_word_IE_int));
-              write(row0, ht);
-              write(row0, ht);
-              write(row0, string'("next_pc="));
-              hwrite(row0, tracer_result);
-            end if;
-
-            if decoded_instruction_IE(BEQ_bit_position) = '1' then
-              write(row0, string'("    beq x"));
-            end if;
-
-            if decoded_instruction_IE(BNE_bit_position) = '1' then
-              write(row0, string'("    bne x"));
-            end if;
-
-            if decoded_instruction_IE(BLT_bit_position) = '1' then
-              write(row0, string'("    blt x"));
-            end if;
-
-            if decoded_instruction_IE(BLTU_bit_position) = '1' then
-              write(row0, string'("    bltu x"));
-            end if;
-
-            if decoded_instruction_IE(BGE_bit_position) = '1' then
-              write(row0, string'("    bge x"));
-            end if;
-
-            if decoded_instruction_IE(BGEU_bit_position) = '1' then
-              write(row0, string'("    bgeu x"));
-            end if;
-
-            if decoded_instruction_IE(BEQ_bit_position)  = '1' or
-               decoded_instruction_IE(BNE_bit_position)  = '1' or
-               decoded_instruction_IE(BLT_bit_position)  = '1' or
-               decoded_instruction_IE(BLTU_bit_position) = '1' or
-               decoded_instruction_IE(BGE_bit_position)  = '1' or
-               decoded_instruction_IE(BGEU_bit_position) = '1' then
-              write(row0, rs1(instr_word_IE_int));
-              write(row0, string'(",x"));
-              write(row0, rs2(instr_word_IE_int));
-              write(row0, string'(",0x"));
-              hwrite(row0, B_imm(instr_word_IE_int));
-              write(row0, ht);
-              write(row0, ht);
-              write(row0, string'("rs1=0x"));
-              hwrite(row0, RS1_Data_IE_int);
-              write(row0, string'("      rs2=0x"));
-              hwrite(row0, RS2_Data_IE_int);
-              write(row0, string'("      next_pc=0x"));
-              hwrite(row0, tracer_result);
-            end if;
-
-            if decoded_instruction_IE(SW_MIP_bit_position) = '1' then
-            end if;
-
-            if decoded_instruction_IE(FENCE_bit_position) = '1' then
-              write(row0, string'("    fence"));
-            end if;
-
-            if decoded_instruction_IE(FENCEI_bit_position) = '1' then
-              write(row0, string'("    fencei"));
-            end if;
-
-            if decoded_instruction_IE(ECALL_bit_position) = '1' then
-              write(row0, string'("    ecall"));
-            end if;
-
-            if decoded_instruction_IE(EBREAK_bit_position) = '1' then
-              write(row0, string'("    ebreak"));
-            end if;
-
-            if decoded_instruction_IE(MRET_bit_position) = '1' then
-              write(row0, string'("    mret"));
-            end if;
-
-            if decoded_instruction_IE(WFI_bit_position) = '1' then
-              write(row0, string'("    wfi"));
-            end if;
-
-            if decoded_instruction_IE(CSRRW_bit_position) = '1' then
-              write(row0, string'("    csrw x"));
-            end if;
-
-            if decoded_instruction_IE(CSRRC_bit_position) = '1' then
-              write(row0, string'("    csrc x"));
-            end if;
-
-            if decoded_instruction_IE(CSRRS_bit_position) = '1' then
-              write(row0, string'("    csrs x"));
-            end if;
-
-            if decoded_instruction_IE(CSRRWI_bit_position) = '1' then
-              write(row0, string'("    csrwi x"));
-            end if;
-
-            if decoded_instruction_IE(CSRRSI_bit_position) = '1' then
-              write(row0, string'("    csrsi x"));
-            end if;
-
-            if decoded_instruction_IE(CSRRCI_bit_position) = '1' then
-              write(row0, string'("    csrci x"));
-            end if;
-
-            if decoded_instruction_IE(CSRRW_bit_position)  = '1' or
-               decoded_instruction_IE(CSRRC_bit_position)  = '1' or 
-               decoded_instruction_IE(CSRRS_bit_position)  = '1' or
-               decoded_instruction_IE(CSRRWI_bit_position) = '1' or
-               decoded_instruction_IE(CSRRSI_bit_position) = '1' or
-               decoded_instruction_IE(CSRRCI_bit_position) = '1' then
-                write(row0, rd(instr_word_IE_int));
-                write(row0, string'(",x"));
-                write(row0, rs1(instr_word_IE_int));
-                case CSR_ADDR(instr_word_IE_int) is
-                  when MSTATUS_addr =>
-                    write(row0, string'(",mstatus"));
-                  when MIP_addr =>
-                    write(row0, string'(",mip"));
-                  when MEPC_addr =>
-                    write(row0, string'(",mepc"));
-                  when MTVEC_addr =>
-                    write(row0, string'(",mtvec"));
-                  when MCAUSE_addr =>
-                    write(row0, string'(",mcause"));
-                  when MESTATUS_addr =>
-                    write(row0, string'(",mestatus"));
-                  when MCPUID_addr =>
-                    write(row0, string'(",mcpuid"));
-                  when MIMPID_addr =>
-                    write(row0, string'(",mimpid"));
-                  when MHARTID_addr =>
-                    write(row0, string'(",mhartid"));
-                  when MIRQ_addr =>
-                    write(row0, string'(",mirq"));
-                  when BADADDR_addr =>
-                    write(row0, string'(",badaddr"));
-                  when MCYCLE_addr =>
-                    write(row0, string'(",mcycle"));
-                  when MCYCLEH_addr =>
-                    write(row0, string'(",mcycleh"));
-                  when MINSTRET_addr =>
-                    write(row0, string'(",minstret"));
-                  when MINSTRETH_addr =>
-                    write(row0, string'(",minstreth"));
-                  when MHPMCOUNTER3_addr =>
-                    write(row0, string'(",mhpcounter3"));
-                  when MHPMCOUNTER6_addr =>
-                    write(row0, string'(",mhpcounter6"));
-                  when MHPMCOUNTER7_addr =>
-                    write(row0, string'(",mhpcounter7"));
-                  when MHPMCOUNTER8_addr =>
-                    write(row0, string'(",mhpcounter8"));
-                  when MHPMCOUNTER9_addr =>
-                    write(row0, string'(",mhpcounter10"));
-                  when MHPMCOUNTER10_addr =>
-                    write(row0, string'(",mhpcounter10"));
-                  when PCER_addr =>
-                    write(row0, string'(",pcer"));
-                  when MHPMEVENT3_addr =>
-                    write(row0, string'(",mhpevent3"));
-                  when MHPMEVENT6_addr =>
-                    write(row0, string'(",mhpevent6"));
-                  when MHPMEVENT7_addr =>
-                    write(row0, string'(",mhpevent7"));
-                  when MHPMEVENT8_addr =>
-                    write(row0, string'(",mhpevent8"));
-                  when MHPMEVENT9_addr =>
-                    write(row0, string'(",mhpevent9"));
-                  when MHPMEVENT10_addr =>
-                    write(row0, string'(",mhpevent10"));
-                  when others =>
-                    write(row0, string'(",0x"));
-                    hwrite(row0, instr_word_IE_int(31 downto 20));
-                end case;
-                write(row0, ht);
-                write(row0, ht);
-                write(row0, string'("rs1=0x"));
-                hwrite(row0, RS1_Data_IE_int);
-            end if;
-
-            if decoded_instruction_IE(ILL_bit_position) = '1' then
-              write(row0, string'("    ill"));
-            end if;
-
-            if decoded_instruction_IE(NOP_bit_position) = '1' then
-              write(row0, string'("    nop"));
-            end if;
-
-            if decoded_instruction_IE(MUL_bit_position) = '1' then
-              write(row0, string'("    mul x"));
-            end if;
-
-            if decoded_instruction_IE(MULH_bit_position)   = '1' then
-              write(row0, string'("    mulh x"));
-            end if;
-
-            if decoded_instruction_IE(MULHU_bit_position)  = '1' then
-              write(row0, string'("    mulhu x"));
-            end if;
-
-            if decoded_instruction_IE(MULHSU_bit_position) = '1' then
-              write(row0, string'("    mulhsu x"));
-            end if;
-
-            if decoded_instruction_IE(DIVU_bit_position) = '1' then
-              write(row0, string'("    divu x"));
-            end if;
-
-            if decoded_instruction_IE(DIV_bit_position) = '1' then
-              write(row0, string'("    div x"));
-            end if;
-
-            if decoded_instruction_IE(REMU_bit_position) = '1' then
-              write(row0, string'("    remu x"));
-            end if;
-
-            if decoded_instruction_IE(REM_bit_position) = '1' then
-              write(row0, string'("    rem x"));
-            end if;
-
-            if decoded_instruction_IE(MUL_bit_position)    = '1' or
-               decoded_instruction_IE(MULH_bit_position)   = '1' or
-               decoded_instruction_IE(MULHU_bit_position)  = '1' or
-               decoded_instruction_IE(MULHSU_bit_position) = '1' or
-               decoded_instruction_IE(DIV_bit_position)    = '1' or
-               decoded_instruction_IE(DIVU_bit_position)   = '1' or
-               decoded_instruction_IE(REMU_bit_position)   = '1' or
-               decoded_instruction_IE(REM_bit_position)    = '1' then
-              write(row0, rd(instr_word_IE_int));
-              write(row0, string'(",x"));
-              write(row0, rs1(instr_word_IE_int));
-              write(row0, string'(",x"));
-              write(row0, rs2(instr_word_IE_int));
-              write(row0, ht);
-              write(row0, ht);
-              write(row0, string'("rs1=0x"));
-              hwrite(row0, RS1_Data_IE_int);
-              write(row0, string'("      rs2=0x"));
-              hwrite(row0, RS2_Data_IE_int);
-              write(row0, string'("      new_rd=0x"));
-              if decoded_instruction_IE(MUL_bit_position) = '1' then
-                hwrite(row0, tracer_mul_result(31 downto 0));
-              elsif decoded_instruction_IE(MULH_bit_position)   = '1' or
-                    decoded_instruction_IE(MULHU_bit_position)  = '1' or
-                    decoded_instruction_IE(MULHSU_bit_position) = '1' then
-                hwrite(row0, tracer_mul_result(63 downto 32));
-              end if;
-            end if;
-
-
-          -- EXECUTE OF INSTRUCTION (END) --------------------------
-          end if;  -- instr_rvalid_IE values
-        when others =>
-      end case;  -- fsm_IE state cases
-
-
-      ----------------------------------------------------------------------------
-      --  ██╗     ███████╗██╗   ██╗    ████████╗██████╗  █████╗  ██████╗███████╗  --
-      --  ██║     ██╔════╝██║   ██║    ╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝  --
-      --  ██║     ███████╗██║   ██║       ██║   ██████╔╝███████║██║     █████╗    --
-      --  ██║     ╚════██║██║   ██║       ██║   ██╔══██╗██╔══██║██║     ██╔══╝    --
-      --  ███████╗███████║╚██████╔╝       ██║   ██║  ██║██║  ██║╚██████╗███████╗  --
-      --  ╚══════╝╚══════╝ ╚═════╝        ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝  --
-      ----------------------------------------------------------------------------
-
-      if LS_instr_req = '1' and halt_LSU = '0' then
-        case state_LS_int is  
-          when normal =>
-
-            if not(decoded_instruction_IE(SW_MIP_bit_position) = '1' and data_addr_internal_IE(31 downto 8) = x"0000FF") then -- checks that the instruction is not a sw_mip
-              write(row0, "   " & to_string(now, ns) & "  ");  --Add a timestamp to line
-              write(row0, ht);
-              hwrite(row0, pc_IE_int);
-              write(row0, '_');
-              hwrite(row0, instr_word_IE_int); 
-            end if;
-
-            if decoded_instruction_LS(LW_bit_position) = '1' then
-              write(row0, string'("    lw x"));
-            end if;
-
-            if decoded_instruction_LS(LH_bit_position) = '1' then
-              write(row0, string'("    lh x"));
-            end if;
-
-            if decoded_instruction_LS(LHU_bit_position) = '1' then
-              write(row0, string'("    lhu x"));
-            end if;
-
-            if decoded_instruction_LS(LB_bit_position) = '1' then
-              write(row0, string'("    lb x"));
-            end if;
-
-            if decoded_instruction_LS(LBU_bit_position) = '1' then
-              write(row0, string'("    lbu x"));
-            end if;
-
-            if decoded_instruction_LS(LW_bit_position) = '1' or
-               decoded_instruction_LS(LH_bit_position) = '1' or decoded_instruction_LS(LHU_bit_position) = '1' or 
-               decoded_instruction_LS(LB_bit_position) = '1' or decoded_instruction_LS(LBU_bit_position) = '1' then
-              write(row0, rd(instr_word_IE_int));
-              write(row0, string'(","));
-              write(row0, string'(",0x"));
-              hwrite(row0, I_imm(instr_word_IE_int));
-              write(row0, string'("(x"));
-              write(row0, rs1(instr_word_IE_int));
-              write(row0, string'(")"));
-              write(row0, ht);
-              write(row0, ht);
-              write(row0, ht);
-              write(row0, string'("rs1=0x"));
-              hwrite(row0, RS1_Data_IE_int);
-              --write(row0, string'("      rd=0x"));
-              --hwrite(row0, RD_Data_IE_int);
-              write(row0, string'("      addr=0x"));
-              hwrite(row0, tracer_result);
-            end if;
-
-            if decoded_instruction_LS(SW_bit_position) = '1' then
-              write(row0, string'("    sw x"));
-            end if;
-
-            if decoded_instruction_LS(SH_bit_position) = '1' then
-              write(row0, string'("    sh x"));
-            end if;
-
-            if decoded_instruction_LS(SB_bit_position) = '1' then
-              write(row0, string'("    sb x"));
-            end if;
-
-           if decoded_instruction_LS(SW_bit_position) = '1' or
-              decoded_instruction_LS(SH_bit_position) = '1' or
-              decoded_instruction_LS(SB_bit_position) = '1' then
-             write(row0, rs2(instr_word_IE_int));
-             write(row0, string'(","));
-             write(row0, string'(",0x"));
-             hwrite(row0, S_imm(instr_word_IE_int));
-             write(row0, string'("(x"));
-             write(row0, rs1(instr_word_IE_int));
-             write(row0, string'(")"));
-             write(row0, ht);
-             write(row0, ht);
-             write(row0, ht);
-             write(row0, string'("rs1=0x"));
-             hwrite(row0, RS1_Data_IE_int);
-             write(row0, string'("      rs2=0x"));
-             hwrite(row0, RS2_Data_IE_int);
-             write(row0, string'("      addr=0x"));
-             hwrite(row0, tracer_result);
-           end if;
-
-            if decoded_instruction_LS(AMOSWAP_bit_position) = '1' then
-              write(row0, string'("    amoswap x"));
-              write(row0, rd(instr_word_IE_int));
-              write(row0, string'(",x"));
-              write(row0, rs2(instr_word_IE_int));
-              write(row0, string'(",(x"));
-              write(row0, rs1(instr_word_IE_int));
-              write(row0, string'(")"));
-              write(row0, string'("      rs1=0x"));
-              hwrite(row0, RS1_Data_IE_int);
-              write(row0, string'("      rs2=0x"));
-              hwrite(row0, RS2_Data_IE_int);
-              write(row0, string'("      rd=0x"));
-              hwrite(row0, RD_Data_IE_int);
-              write(row0, string'("      addr=0x"));
-              hwrite(row0, tracer_result);
-            end if;
-
-          when data_valid_waiting =>
-        end case;
-      end if;
-
-     ----------------------------------------------------------------------- Write Line -------------------------------------------------------------
-    file_open(trace_o, filenames(harc_EXEC_int), append_mode);
-     for i in 0 to THREAD_POOL_SIZE-1 loop
-       if harc_EXEC_int = i then  
-         if (instr_rvalid_IE_int = '1') then
-           if i = 0 then
-             writeline(file_handler0, row0);  -- Writes line to instr. trace file
-           elsif i = 1 then
-             writeline(file_handler1, row0);  -- Writes line to instr. trace file
-           elsif i = 2 then
-             writeline(file_handler2, row0);  -- Writes line to instr. trace file
-           elsif i = 3 then
-             writeline(file_handler3, row0);  -- Writes line to instr. trace file
-           end if;
-           writeline(trace_o, row0);
-         end if;
-       end if;
-     end loop;
-    file_close (trace_o);
-     ------------------------------------------------------------------------------------------------------------------------------------------------
-
-    end if;  -- reset, clk_i
-  end process;
-  
-  
-
-  ----------------------------------------------------------------------------------------------------
-  --  ████████╗██████╗  █████╗ ███████╗██████╗     ██████╗ ███████╗███████╗██╗   ██╗██╗  ████████╗  --
-  --  ╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔══██╗    ██╔══██╗██╔════╝██╔════╝██║   ██║██║  ╚══██╔══╝  --
-  --     ██║   ██████╔╝███████║█████╗  ██████╔╝    ██████╔╝█████╗  ███████╗██║   ██║██║     ██║     --
-  --     ██║   ██╔══██╗██╔══██║██╔══╝  ██╔══██╗    ██╔══██╗██╔══╝  ╚════██║██║   ██║██║     ██║     --
-  --     ██║   ██║  ██║██║  ██║███████╗██║  ██║    ██║  ██║███████╗███████║╚██████╔╝███████╗██║     --
-  --     ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝    ╚═╝  ╚═╝╚══════╝╚══════╝ ╚═════╝ ╚══════╝╚═╝     --
-  ----------------------------------------------------------------------------------------------------
-
-
-  Tracer_Comb : process(
-                        state_IE, IE_instr_req, core_busy_IE_lat, irq_pending, decoded_instruction_IE, 
-                        instr_word_ie_int, rs1_data_ie_int, rs2_data_ie_int, pc_IE_int, LS_instr_req,
-                        state_LS_int, decoded_instruction_LS
-                       ) --VHDL1993
-  -- also implements the delay slot counters and some aux signals
-  begin
-
-    IE_instr                        <= '0';
-    LSU_instr                       <= '0';
-    rs1_valid                       <= '0';
-    rs2_valid                       <= '0';
-    rd_read_only_valid              <= '0';
-    rd_valid                        <= '0';
-
-    case state_IE is                  -- stage status
-      when normal =>
-        if ie_instr_req = '0' and core_busy_IE_lat = '0' then
-        elsif irq_pending(harc_EXEC_int) = '1' then
-        else -- process the instruction
-          IE_instr <= '1';
-          -- TRACE IF EXECUTE INSTRUCTIONS ---------------------
-
-          if decoded_instruction_IE(ADDI_bit_position)  = '1'  then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)+signed(I_immediate(instr_word_IE_int)));
-          end if;
-
-          if decoded_instruction_IE(SLTI_bit_position)  = '1'  then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            if (signed(RS1_Data_IE_int) < signed (I_immediate(instr_word_IE_int))) then
-              tracer_result <= std_logic_vector(to_unsigned(1, 32));
-            else
-              tracer_result <= std_logic_vector(to_unsigned(0, 32));
-            end if;
-          end if;
-
-          if decoded_instruction_IE(SLTIU_bit_position)  = '1'  then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            if (unsigned(RS1_Data_IE_int) < unsigned (I_immediate(instr_word_IE_int))) then
-              tracer_result <= std_logic_vector(to_unsigned(1, 32));
-            else
-              tracer_result <= std_logic_vector(to_unsigned(0, 32));
-            end if;
-          end if;
-
-          if decoded_instruction_IE(ANDI_bit_position)  = '1'  then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= RS1_Data_IE_int and I_immediate(instr_word_IE_int);
-          end if;
-
-          if decoded_instruction_IE(ORI_bit_position)  = '1'  then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= RS1_Data_IE_int or I_immediate(instr_word_IE_int);
-          end if;
-
-          if decoded_instruction_IE(XORI_bit_position)  = '1'  then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= RS1_Data_IE_int xor I_immediate(instr_word_IE_int);
-          end if;
-
-          if decoded_instruction_IE(SLLI_bit_position)  = '1'  then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) sll to_integer(unsigned(SHAMT(instr_word_IE_int))));
-          end if;
-
-          if decoded_instruction_IE(SRLI7_bit_position)  = '1'  then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) srl to_integer(unsigned(SHAMT(instr_word_IE_int))));
-          end if;
-
-          if decoded_instruction_IE(SRAI7_bit_position)  = '1'  then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) sra to_integer(unsigned(SHAMT(instr_word_IE_int))));
-          end if;
-
-          if decoded_instruction_IE(LUI_bit_position) = '1' then
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= std_logic_vector(unsigned(U_immediate(instr_word_IE_int)));
-          end if;
-
-          if decoded_instruction_IE(AUIPC_bit_position) = '1' then
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= std_logic_vector(unsigned(U_immediate(instr_word_IE_int))+unsigned(pc_IE_int));
-          end if;
-
-          if decoded_instruction_IE(ADD7_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)+signed(RS2_Data_IE_int));
-          end if;
-
-          if decoded_instruction_IE(SUB7_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)-signed(RS2_Data_IE_int));
-          end if;
-
-          if decoded_instruction_IE(SLT_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            if (signed(RS1_Data_IE_int) < signed(RS2_Data_IE_int)) then
-              tracer_result <= std_logic_vector(to_unsigned(1, 32));
-            else
-              tracer_result <= std_logic_vector(to_unsigned(0, 32));
-            end if;
-          end if;
-
-          if decoded_instruction_IE(SLTU_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            if (unsigned(RS1_Data_IE_int) < unsigned(RS2_Data_IE_int)) then
-              tracer_result <= std_logic_vector(to_unsigned(1, 32));
-            else
-              tracer_result <= std_logic_vector(to_unsigned(0, 32));
-            end if;
-          end if;
-
-          if decoded_instruction_IE(ANDD_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= RS1_Data_IE_int and RS2_Data_IE_int;
-          end if;
-
-          if decoded_instruction_IE(ORR_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= RS1_Data_IE_int or RS2_Data_IE_int;
-          end if;
-
-          if decoded_instruction_IE(XORR_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= RS1_Data_IE_int xor RS2_Data_IE_int;
-          end if;
-
-          if decoded_instruction_IE(SLLL_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) sll to_integer(unsigned(RS2_Data_IE_int(4 downto 0))));
-          end if;
-
-          if decoded_instruction_IE(SRLL7_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) srl to_integer(unsigned(RS2_Data_IE_int(4 downto 0))));
-          end if;
-
-          if decoded_instruction_IE(SRAA7_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) sra to_integer(unsigned(RS2_Data_IE_int(4 downto 0))));
-          end if;
-
-          if decoded_instruction_IE(FENCE_bit_position) = '1' or decoded_instruction_IE(FENCEI_bit_position) = '1' then
-          end if;
-
-          if decoded_instruction_IE(JAL_bit_position) = '1' then  -- JAL instruction
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(UJ_immediate(instr_word_IE_int)));
-          end if;
-
-          if decoded_instruction_IE(JALR_bit_position) = '1' then  --JALR instruction
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)+signed(I_immediate(instr_word_IE_int)));
-          end if;
-
-          if decoded_instruction_IE(BEQ_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            if (signed(RS1_Data_IE_int) = signed(RS2_Data_IE_int)) then
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
-            else
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);                
-            end if;
-          end if;
-
-          if decoded_instruction_IE(BNE_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            if (signed(RS1_Data_IE_int) /= signed(RS2_Data_IE_int)) then
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
-            else
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);  
-            end if;
-          end if;
-
-          if decoded_instruction_IE(BLT_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            if (signed(RS1_Data_IE_int) < signed(RS2_Data_IE_int)) then
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
-            else
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);  
-            end if;
-          end if;
-
-          if decoded_instruction_IE(BLTU_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            if (unsigned(RS1_Data_IE_int) < unsigned(RS2_Data_IE_int)) then
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
-            else
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);  
-            end if;
-          end if;
-
-          if decoded_instruction_IE(BGE_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            if (signed(RS1_Data_IE_int) >= signed(RS2_Data_IE_int)) then
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
-            else
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);  
-            end if;
-          end if;
-
-          if decoded_instruction_IE(BGEU_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            if (signed(RS1_Data_IE_int) >= signed(RS2_Data_IE_int)) then
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
-            else
-              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);  
-            end if;
-          end if;
-
-          if decoded_instruction_IE(SW_MIP_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-          end if;
-
-          if decoded_instruction_IE(CSRRW_bit_position) = '1' or decoded_instruction_IE(CSRRWI_bit_position) = '1' or
-             decoded_instruction_IE(CSRRC_bit_position) = '1' or decoded_instruction_IE(CSRRCI_bit_position) = '1' or
-             decoded_instruction_IE(CSRRS_bit_position) = '1' or decoded_instruction_IE(CSRRSI_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-          end if;
-
-          if decoded_instruction_IE(ECALL_bit_position) = '1' then
-          end if;
-
-          if decoded_instruction_IE(EBREAK_bit_position) = '1' then
-          end if;
-
-          if decoded_instruction_IE(MRET_bit_position) = '1' then
-          end if;
-
-          if decoded_instruction_IE(WFI_bit_position) = '1' then
-          end if;
-
-          if decoded_instruction_IE(ILL_bit_position) = '1' then  -- ILLEGAL_INSTRUCTION
-          end if;
-
-          if decoded_instruction_IE(NOP_bit_position) = '1' then
-          end if;
-
-          if decoded_instruction_IE(MUL_bit_position)    = '1' or 
-             decoded_instruction_IE(MULH_bit_position)   = '1' or
-             decoded_instruction_IE(MULHU_bit_position)  = '1' or
-             decoded_instruction_IE(MULHSU_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-          end if;
-
-          if decoded_instruction_IE(MUL_bit_position) = '1' or 
-             decoded_instruction_IE(MULH_bit_position) = '1' then
-            tracer_mul_result <= std_logic_vector(signed(RS1_Data_IE_int)*signed(RS2_Data_IE_int));
-          end if;
-
-          if decoded_instruction_IE(MULHU_bit_position) = '1' then
-            tracer_mul_result <= std_logic_vector(unsigned(RS1_Data_IE_int)*unsigned(RS2_Data_IE_int));
-          end if;
-
-          if decoded_instruction_IE(MULHSU_bit_position) = '1' then
-            tracer_mul_result <= x"FFFFFFFF_00000000";
-          end if;
-
-          if decoded_instruction_IE(DIV_bit_position)  = '1' or 
-             decoded_instruction_IE(REM_bit_position)  = '1' or
-             decoded_instruction_IE(DIVU_bit_position) = '1' or 
-             decoded_instruction_IE(REMU_bit_position) = '1' then
-            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
-          end if;
-
-        -- EXECUTE OF INSTRUCTION (END)
-        end if;  -- instr_rvalid_IE values 
-
-      when others =>
-
-    end case;  -- fsm_IE state cases
-
-    if LS_instr_req = '1' then
-      LSU_instr <= '1';
-      case state_LS_int is  
-        when normal =>
-          if decoded_instruction_LS(LW_bit_position) = '1' or
-             decoded_instruction_LS(LH_bit_position) = '1' or decoded_instruction_LS(LHU_bit_position) = '1' or 
-             decoded_instruction_LS(LB_bit_position) = '1' or decoded_instruction_LS(LBU_bit_position) = '1' then
-            rs1_valid           <= '1' when rs1(instr_word_IE_int) /= 0;
-            rd_valid            <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)+signed(I_immediate(instr_word_IE_int)));
-          end if;
-
-          if decoded_instruction_LS(SW_bit_position) = '1' or
-             decoded_instruction_LS(SH_bit_position) = '1' or 
-             decoded_instruction_LS(SB_bit_position) = '1' then
-            rs1_valid           <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid           <= '1' when rs2(instr_word_IE_int) /= 0;
-            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)+signed(S_immediate(instr_word_IE_int)));
-          end if;
-
-          if decoded_instruction_LS(AMOSWAP_bit_position) = '1' then
-            rs1_valid           <= '1' when rs1(instr_word_IE_int) /= 0;
-            rs2_valid           <= '1' when rs2(instr_word_IE_int) /= 0;
-            rd_valid            <= '1' when rd(instr_word_IE_int)  /= 0;
-            tracer_result <= RS1_Data_IE_int;
-          end if;
-
-        when data_valid_waiting =>
-      end case;
-    end if;
-
-  end process;
-  end generate Tracer_generate;
+--  Tracer_generate : if tracer_en = 1 generate
+--  Tracer_sync : process(clk_i, rst_ni) -- also implements the delay slot counters and some aux signals
+--    --alias ie_instr_req_a     is <<signal .tb.top_i.core_region_i.CORE.RISCV_CORE.T13_inst.Pipe.DECODE.ie_instr_req : std_logic>>;
+--    --alias core_busy_IE_lat_a is <<signal .tb.top_i.core_region_i.CORE.RISCV_CORE.T13_inst.Pipe.EXECUTE.core_busy_IE_lat : std_logic>>;
+--    --alias irq_pending_a      is <<signal .tb.top_i.core_region_i.CORE.RISCV_CORE.T13_inst.Prg_Ctr.irq_pending : std_logic_vector(harc_range)>>;
+--    file     trace_o    : text;
+--    variable file_state : fstate_arr := (others => closed); -- AAA decide whether to put this inside a reset state where the trace is reset everytime (consider FT processors that always reset the failed tests)
+--    variable row        : line;
+--    variable row0       : line;
+--  begin
+--    if rst_ni = '0' then
+--    elsif rising_edge(clk_i) then
+--
+--      ----------------------------------------------------------------
+--      --  ██╗███████╗    ████████╗██████╗  █████╗  ██████╗███████╗  --
+--      --  ██║██╔════╝    ╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝  --
+--      --  ██║█████╗         ██║   ██████╔╝███████║██║     █████╗    --
+--      --  ██║██╔══╝         ██║   ██╔══██╗██╔══██║██║     ██╔══╝    --
+--      --  ██║███████╗       ██║   ██║  ██║██║  ██║╚██████╗███████╗  --
+--      --  ╚═╝╚══════╝       ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝  --
+--      ----------------------------------------------------------------
+--
+--      case state_IE is -- stage state
+--        when normal =>
+--          if  ie_instr_req = '0' and core_busy_IE_lat = '0' then
+--          elsif irq_pending(harc_EXEC_int) = '1' then
+--          else
+--            -- EXECUTE OF INSTRUCTION -------------------------------------------
+--            if (decoded_instruction_IE(SW_MIP_bit_position) = '1') then
+--              if (data_addr_internal_IE(31 downto 8) = x"0000FF") then -- checks that the instruction is not a store
+--                write(row0, "   " & to_string(now, ns) & "  ");  --Add a timestamp to line
+--                write(row0, ht);
+--                hwrite(row0, pc_IE_int);
+--                write(row0, string'("_"));
+--                hwrite(row0, instr_word_IE_int); 
+--              end if;
+--            else
+--              write(row0, "   " & to_string(now, ns) & "  ");  --Add a timestamp to line
+--              write(row0, ht);
+--              hwrite(row0, pc_IE_int);
+--              write(row0, string'("_"));
+--              hwrite(row0, instr_word_IE_int); 
+--            end if;
+--
+--            if decoded_instruction_IE(ADDI_bit_position) = '1' then
+--              write(row0, string'("    addi x"));
+--            end if;
+--
+--            if decoded_instruction_IE(SLTI_bit_position) = '1' then
+--              write(row0, string'("    slti x"));
+--            end if;
+--
+--            if decoded_instruction_IE(SLTIU_bit_position) = '1' then
+--              write(row0, string'("    sltiu x"));
+--            end if;
+--
+--            if decoded_instruction_IE(ANDI_bit_position) = '1' then
+--              write(row0, string'("    andi x"));
+--            end if;
+--
+--            if decoded_instruction_IE(ORI_bit_position) = '1' then
+--              write(row0, string'("    ori x"));
+--            end if;
+--
+--            if decoded_instruction_IE(XORI_bit_position) = '1' then
+--              write(row0, string'("    xori x"));
+--            end if;
+--
+--            if decoded_instruction_IE(SLLI_bit_position) = '1' then
+--              write(row0, string'("    slli x"));
+--            end if;
+--
+--            if decoded_instruction_IE(SRLI7_bit_position) = '1' then
+--              write(row0, string'("    srli x"));
+--            end if;
+--
+--            if decoded_instruction_IE(SRAI7_bit_position) = '1' then
+--              write(row0, string'("    srai x"));
+--            end if;
+--
+--            if   decoded_instruction_IE(ADDI_bit_position)  = '1' or decoded_instruction_IE(SLTI_bit_position)  = '1'
+--              or decoded_instruction_IE(SLTIU_bit_position) = '1' or decoded_instruction_IE(ANDI_bit_position)  = '1'
+--              or decoded_instruction_IE(ORI_bit_position)   = '1' or decoded_instruction_IE(XORI_bit_position)  = '1'
+--              or decoded_instruction_IE(SLLI_bit_position)  = '1' or decoded_instruction_IE(SRLI7_bit_position) = '1'
+--              or decoded_instruction_IE(SRAI7_bit_position) = '1' then
+--              write(row0, rd(instr_word_IE_int));
+--              write(row0, string'(",x"));
+--              write(row0, rs1(instr_word_IE_int));
+--              write(row0, string'(",0x"));
+--              hwrite(row0, I_imm(instr_word_IE_int));
+--              write(row0, ht);
+--              write(row0, ht);
+--              write(row0, string'("rs1=0x"));
+--              hwrite(row0, RS1_Data_IE_int);
+--              write(row0, string'("      new_rd=0x"));
+--              hwrite(row0, tracer_result);
+--            end if;
+--
+--            if decoded_instruction_IE(LUI_bit_position) = '1' then
+--              write(row0, string'("    lui x"));
+--              write(row0, rd(instr_word_IE_int));
+--              write(row0, string'(",0x"));
+--              hwrite(row0, U_imm(instr_word_IE_int));
+--              write(row0, ht);
+--              write(row0, ht);
+--              write(row0, string'("      new_rd=0x"));
+--              hwrite(row0, tracer_result);
+--            end if;
+--
+--            if decoded_instruction_IE(AUIPC_bit_position) = '1' then
+--              write(row0, string'("    auipc x"));
+--              write(row0, rd(instr_word_IE_int));
+--              write(row0, string'(",0x"));
+--              hwrite(row0, U_imm(instr_word_IE_int));
+--              write(row0, ht);
+--              write(row0, ht);
+--              write(row0, string'("      new_rd=0x"));
+--              hwrite(row0, tracer_result);
+--            end if;
+--
+--            if decoded_instruction_IE(ADD7_bit_position) = '1' then
+--              write(row0, string'("    add x"));
+--            end if;
+--
+--            if decoded_instruction_IE(SUB7_bit_position) = '1' then
+--              write(row0, string'("    sub x"));
+--            end if;
+--
+--            if decoded_instruction_IE(SLT_bit_position) = '1' then
+--              write(row0, string'("    slt x"));
+--            end if;
+--
+--            if decoded_instruction_IE(SLTU_bit_position) = '1' then
+--              write(row0, string'("    sltu x"));
+--            end if;
+--
+--            if decoded_instruction_IE(ANDD_bit_position) = '1' then
+--              write(row0, string'("    and x"));
+--            end if;
+--
+--            if decoded_instruction_IE(ORR_bit_position) = '1' then
+--              write(row0, string'("    or x"));
+--            end if;
+--
+--            if decoded_instruction_IE(XORR_bit_position) = '1' then
+--              write(row0, string'("    xor x"));
+--            end if;
+--
+--            if decoded_instruction_IE(SLLL_bit_position) = '1' then
+--              write(row0, string'("    sll x"));
+--            end if;
+--
+--            if decoded_instruction_IE(SRLL7_bit_position) = '1' then
+--              write(row0, string'("    srl x"));
+--            end if;
+--
+--            if decoded_instruction_IE(SRAA7_bit_position) = '1' then
+--              write(row0, string'("    sra x"));
+--            end if;
+--
+--            if   decoded_instruction_IE(ADD7_bit_position)  = '1' or decoded_instruction_IE(SUB7_bit_position)  = '1'
+--              or decoded_instruction_IE(SLT_bit_position)   = '1' or decoded_instruction_IE(SLTU_bit_position)  = '1'
+--              or decoded_instruction_IE(ANDD_bit_position)  = '1' or decoded_instruction_IE(ORR_bit_position)   = '1'
+--              or decoded_instruction_IE(XORR_bit_position)  = '1' or decoded_instruction_IE(SLLL_bit_position)  = '1'
+--              or decoded_instruction_IE(SRLL7_bit_position) = '1' or decoded_instruction_IE(SRAA7_bit_position) = '1' then
+--              write(row0, rd(instr_word_IE_int));
+--              write(row0, string'(",x"));
+--              write(row0, rs1(instr_word_IE_int));
+--              write(row0, string'(",x"));
+--              write(row0, rs2(instr_word_IE_int));
+--              write(row0, ht);
+--              write(row0, ht);
+--              write(row0, string'("rs1=0x"));
+--              hwrite(row0, RS1_Data_IE_int);
+--              write(row0, string'("      rs2=0x"));
+--              hwrite(row0, RS2_Data_IE_int);
+--              write(row0, string'("      new_rd=0x"));
+--              hwrite(row0, tracer_result);            end if;
+--
+--            if decoded_instruction_IE(JAL_bit_position) = '1' then
+--              write(row0, string'("    jal x"));
+--              write(row0, rd(instr_word_IE_int));
+--              write(row0, string'(",0x"));
+--              hwrite(row0, UJ_imm(instr_word_IE_int));
+--              write(row0, ht);
+--              write(row0, ht);
+--              write(row0, string'("next_pc="));
+--              hwrite(row0, tracer_result);
+--            end if;
+--
+--            if decoded_instruction_IE(JALR_bit_position) = '1' then
+--              write(row0, string'("    jalr x"));
+--              write(row0, rd(instr_word_IE_int));
+--              write(row0, string'(",x"));
+--              write(row0, rs1(instr_word_IE_int));
+--              write(row0, string'(",0x"));
+--              hwrite(row0, I_imm(instr_word_IE_int));
+--              write(row0, ht);
+--              write(row0, ht);
+--              write(row0, string'("next_pc="));
+--              hwrite(row0, tracer_result);
+--            end if;
+--
+--            if decoded_instruction_IE(BEQ_bit_position) = '1' then
+--              write(row0, string'("    beq x"));
+--            end if;
+--
+--            if decoded_instruction_IE(BNE_bit_position) = '1' then
+--              write(row0, string'("    bne x"));
+--            end if;
+--
+--            if decoded_instruction_IE(BLT_bit_position) = '1' then
+--              write(row0, string'("    blt x"));
+--            end if;
+--
+--            if decoded_instruction_IE(BLTU_bit_position) = '1' then
+--              write(row0, string'("    bltu x"));
+--            end if;
+--
+--            if decoded_instruction_IE(BGE_bit_position) = '1' then
+--              write(row0, string'("    bge x"));
+--            end if;
+--
+--            if decoded_instruction_IE(BGEU_bit_position) = '1' then
+--              write(row0, string'("    bgeu x"));
+--            end if;
+--
+--            if decoded_instruction_IE(BEQ_bit_position)  = '1' or
+--               decoded_instruction_IE(BNE_bit_position)  = '1' or
+--               decoded_instruction_IE(BLT_bit_position)  = '1' or
+--               decoded_instruction_IE(BLTU_bit_position) = '1' or
+--               decoded_instruction_IE(BGE_bit_position)  = '1' or
+--               decoded_instruction_IE(BGEU_bit_position) = '1' then
+--              write(row0, rs1(instr_word_IE_int));
+--              write(row0, string'(",x"));
+--              write(row0, rs2(instr_word_IE_int));
+--              write(row0, string'(",0x"));
+--              hwrite(row0, B_imm(instr_word_IE_int));
+--              write(row0, ht);
+--              write(row0, ht);
+--              write(row0, string'("rs1=0x"));
+--              hwrite(row0, RS1_Data_IE_int);
+--              write(row0, string'("      rs2=0x"));
+--              hwrite(row0, RS2_Data_IE_int);
+--              write(row0, string'("      next_pc=0x"));
+--              hwrite(row0, tracer_result);
+--            end if;
+--
+--            if decoded_instruction_IE(SW_MIP_bit_position) = '1' then
+--            end if;
+--
+--            if decoded_instruction_IE(FENCE_bit_position) = '1' then
+--              write(row0, string'("    fence"));
+--            end if;
+--
+--            if decoded_instruction_IE(FENCEI_bit_position) = '1' then
+--              write(row0, string'("    fencei"));
+--            end if;
+--
+--            if decoded_instruction_IE(ECALL_bit_position) = '1' then
+--              write(row0, string'("    ecall"));
+--            end if;
+--
+--            if decoded_instruction_IE(EBREAK_bit_position) = '1' then
+--              write(row0, string'("    ebreak"));
+--            end if;
+--
+--            if decoded_instruction_IE(MRET_bit_position) = '1' then
+--              write(row0, string'("    mret"));
+--            end if;
+--
+--            if decoded_instruction_IE(WFI_bit_position) = '1' then
+--              write(row0, string'("    wfi"));
+--            end if;
+--
+--            if decoded_instruction_IE(CSRRW_bit_position) = '1' then
+--              write(row0, string'("    csrw x"));
+--            end if;
+--
+--            if decoded_instruction_IE(CSRRC_bit_position) = '1' then
+--              write(row0, string'("    csrc x"));
+--            end if;
+--
+--            if decoded_instruction_IE(CSRRS_bit_position) = '1' then
+--              write(row0, string'("    csrs x"));
+--            end if;
+--
+--            if decoded_instruction_IE(CSRRWI_bit_position) = '1' then
+--              write(row0, string'("    csrwi x"));
+--            end if;
+--
+--            if decoded_instruction_IE(CSRRSI_bit_position) = '1' then
+--              write(row0, string'("    csrsi x"));
+--            end if;
+--
+--            if decoded_instruction_IE(CSRRCI_bit_position) = '1' then
+--              write(row0, string'("    csrci x"));
+--            end if;
+--
+--            if decoded_instruction_IE(CSRRW_bit_position)  = '1' or
+--               decoded_instruction_IE(CSRRC_bit_position)  = '1' or 
+--               decoded_instruction_IE(CSRRS_bit_position)  = '1' or
+--               decoded_instruction_IE(CSRRWI_bit_position) = '1' or
+--               decoded_instruction_IE(CSRRSI_bit_position) = '1' or
+--               decoded_instruction_IE(CSRRCI_bit_position) = '1' then
+--                write(row0, rd(instr_word_IE_int));
+--                write(row0, string'(",x"));
+--                write(row0, rs1(instr_word_IE_int));
+--                case CSR_ADDR(instr_word_IE_int) is
+--                  when MSTATUS_addr =>
+--                    write(row0, string'(",mstatus"));
+--                  when MIP_addr =>
+--                    write(row0, string'(",mip"));
+--                  when MEPC_addr =>
+--                    write(row0, string'(",mepc"));
+--                  when MTVEC_addr =>
+--                    write(row0, string'(",mtvec"));
+--                  when MCAUSE_addr =>
+--                    write(row0, string'(",mcause"));
+--                  when MESTATUS_addr =>
+--                    write(row0, string'(",mestatus"));
+--                  when MCPUID_addr =>
+--                    write(row0, string'(",mcpuid"));
+--                  when MIMPID_addr =>
+--                    write(row0, string'(",mimpid"));
+--                  when MHARTID_addr =>
+--                    write(row0, string'(",mhartid"));
+--                  when MIRQ_addr =>
+--                    write(row0, string'(",mirq"));
+--                  when BADADDR_addr =>
+--                    write(row0, string'(",badaddr"));
+--                  when MCYCLE_addr =>
+--                    write(row0, string'(",mcycle"));
+--                  when MCYCLEH_addr =>
+--                    write(row0, string'(",mcycleh"));
+--                  when MINSTRET_addr =>
+--                    write(row0, string'(",minstret"));
+--                  when MINSTRETH_addr =>
+--                    write(row0, string'(",minstreth"));
+--                  when MHPMCOUNTER3_addr =>
+--                    write(row0, string'(",mhpcounter3"));
+--                  when MHPMCOUNTER6_addr =>
+--                    write(row0, string'(",mhpcounter6"));
+--                  when MHPMCOUNTER7_addr =>
+--                    write(row0, string'(",mhpcounter7"));
+--                  when MHPMCOUNTER8_addr =>
+--                    write(row0, string'(",mhpcounter8"));
+--                  when MHPMCOUNTER9_addr =>
+--                    write(row0, string'(",mhpcounter10"));
+--                  when MHPMCOUNTER10_addr =>
+--                    write(row0, string'(",mhpcounter10"));
+--                  when PCER_addr =>
+--                    write(row0, string'(",pcer"));
+--                  when MHPMEVENT3_addr =>
+--                    write(row0, string'(",mhpevent3"));
+--                  when MHPMEVENT6_addr =>
+--                    write(row0, string'(",mhpevent6"));
+--                  when MHPMEVENT7_addr =>
+--                    write(row0, string'(",mhpevent7"));
+--                  when MHPMEVENT8_addr =>
+--                    write(row0, string'(",mhpevent8"));
+--                  when MHPMEVENT9_addr =>
+--                    write(row0, string'(",mhpevent9"));
+--                  when MHPMEVENT10_addr =>
+--                    write(row0, string'(",mhpevent10"));
+--                  when others =>
+--                    write(row0, string'(",0x"));
+--                    hwrite(row0, instr_word_IE_int(31 downto 20));
+--                end case;
+--                write(row0, ht);
+--                write(row0, ht);
+--                write(row0, string'("rs1=0x"));
+--                hwrite(row0, RS1_Data_IE_int);
+--            end if;
+--
+--            if decoded_instruction_IE(ILL_bit_position) = '1' then
+--              write(row0, string'("    ill"));
+--            end if;
+--
+--            if decoded_instruction_IE(NOP_bit_position) = '1' then
+--              write(row0, string'("    nop"));
+--            end if;
+--
+--            if decoded_instruction_IE(MUL_bit_position) = '1' then
+--              write(row0, string'("    mul x"));
+--            end if;
+--
+--            if decoded_instruction_IE(MULH_bit_position)   = '1' then
+--              write(row0, string'("    mulh x"));
+--            end if;
+--
+--            if decoded_instruction_IE(MULHU_bit_position)  = '1' then
+--              write(row0, string'("    mulhu x"));
+--            end if;
+--
+--            if decoded_instruction_IE(MULHSU_bit_position) = '1' then
+--              write(row0, string'("    mulhsu x"));
+--            end if;
+--
+--            if decoded_instruction_IE(DIVU_bit_position) = '1' then
+--              write(row0, string'("    divu x"));
+--            end if;
+--
+--            if decoded_instruction_IE(DIV_bit_position) = '1' then
+--              write(row0, string'("    div x"));
+--            end if;
+--
+--            if decoded_instruction_IE(REMU_bit_position) = '1' then
+--              write(row0, string'("    remu x"));
+--            end if;
+--
+--            if decoded_instruction_IE(REM_bit_position) = '1' then
+--              write(row0, string'("    rem x"));
+--            end if;
+--
+--            if decoded_instruction_IE(MUL_bit_position)    = '1' or
+--               decoded_instruction_IE(MULH_bit_position)   = '1' or
+--               decoded_instruction_IE(MULHU_bit_position)  = '1' or
+--               decoded_instruction_IE(MULHSU_bit_position) = '1' or
+--               decoded_instruction_IE(DIV_bit_position)    = '1' or
+--               decoded_instruction_IE(DIVU_bit_position)   = '1' or
+--               decoded_instruction_IE(REMU_bit_position)   = '1' or
+--               decoded_instruction_IE(REM_bit_position)    = '1' then
+--              write(row0, rd(instr_word_IE_int));
+--              write(row0, string'(",x"));
+--              write(row0, rs1(instr_word_IE_int));
+--              write(row0, string'(",x"));
+--              write(row0, rs2(instr_word_IE_int));
+--              write(row0, ht);
+--              write(row0, ht);
+--              write(row0, string'("rs1=0x"));
+--              hwrite(row0, RS1_Data_IE_int);
+--              write(row0, string'("      rs2=0x"));
+--              hwrite(row0, RS2_Data_IE_int);
+--              write(row0, string'("      new_rd=0x"));
+--              if decoded_instruction_IE(MUL_bit_position) = '1' then
+--                hwrite(row0, tracer_mul_result(31 downto 0));
+--              elsif decoded_instruction_IE(MULH_bit_position)   = '1' or
+--                    decoded_instruction_IE(MULHU_bit_position)  = '1' or
+--                    decoded_instruction_IE(MULHSU_bit_position) = '1' then
+--                hwrite(row0, tracer_mul_result(63 downto 32));
+--              end if;
+--            end if;
+--
+--
+--          -- EXECUTE OF INSTRUCTION (END) --------------------------
+--          end if;  -- instr_rvalid_IE values
+--        when others =>
+--      end case;  -- fsm_IE state cases
+--
+--
+--      ----------------------------------------------------------------------------
+--      --  ██╗     ███████╗██╗   ██╗    ████████╗██████╗  █████╗  ██████╗███████╗  --
+--      --  ██║     ██╔════╝██║   ██║    ╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝  --
+--      --  ██║     ███████╗██║   ██║       ██║   ██████╔╝███████║██║     █████╗    --
+--      --  ██║     ╚════██║██║   ██║       ██║   ██╔══██╗██╔══██║██║     ██╔══╝    --
+--      --  ███████╗███████║╚██████╔╝       ██║   ██║  ██║██║  ██║╚██████╗███████╗  --
+--      --  ╚══════╝╚══════╝ ╚═════╝        ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝  --
+--      ----------------------------------------------------------------------------
+--
+--      if LS_instr_req = '1' and halt_LSU = '0' then
+--        case state_LS_int is  
+--          when normal =>
+--
+--            if not(decoded_instruction_IE(SW_MIP_bit_position) = '1' and data_addr_internal_IE(31 downto 8) = x"0000FF") then -- checks that the instruction is not a sw_mip
+--              write(row0, "   " & to_string(now, ns) & "  ");  --Add a timestamp to line
+--              write(row0, ht);
+--              hwrite(row0, pc_IE_int);
+--              write(row0, '_');
+--              hwrite(row0, instr_word_IE_int); 
+--            end if;
+--
+--            if decoded_instruction_LS(LW_bit_position) = '1' then
+--              write(row0, string'("    lw x"));
+--            end if;
+--
+--            if decoded_instruction_LS(LH_bit_position) = '1' then
+--              write(row0, string'("    lh x"));
+--            end if;
+--
+--            if decoded_instruction_LS(LHU_bit_position) = '1' then
+--              write(row0, string'("    lhu x"));
+--            end if;
+--
+--            if decoded_instruction_LS(LB_bit_position) = '1' then
+--              write(row0, string'("    lb x"));
+--            end if;
+--
+--            if decoded_instruction_LS(LBU_bit_position) = '1' then
+--              write(row0, string'("    lbu x"));
+--            end if;
+--
+--            if decoded_instruction_LS(LW_bit_position) = '1' or
+--               decoded_instruction_LS(LH_bit_position) = '1' or decoded_instruction_LS(LHU_bit_position) = '1' or 
+--               decoded_instruction_LS(LB_bit_position) = '1' or decoded_instruction_LS(LBU_bit_position) = '1' then
+--              write(row0, rd(instr_word_IE_int));
+--              write(row0, string'(","));
+--              write(row0, string'(",0x"));
+--              hwrite(row0, I_imm(instr_word_IE_int));
+--              write(row0, string'("(x"));
+--              write(row0, rs1(instr_word_IE_int));
+--              write(row0, string'(")"));
+--              write(row0, ht);
+--              write(row0, ht);
+--              write(row0, ht);
+--              write(row0, string'("rs1=0x"));
+--              hwrite(row0, RS1_Data_IE_int);
+--              --write(row0, string'("      rd=0x"));
+--              --hwrite(row0, RD_Data_IE_int);
+--              write(row0, string'("      addr=0x"));
+--              hwrite(row0, tracer_result);
+--            end if;
+--
+--            if decoded_instruction_LS(SW_bit_position) = '1' then
+--              write(row0, string'("    sw x"));
+--            end if;
+--
+--            if decoded_instruction_LS(SH_bit_position) = '1' then
+--              write(row0, string'("    sh x"));
+--            end if;
+--
+--            if decoded_instruction_LS(SB_bit_position) = '1' then
+--              write(row0, string'("    sb x"));
+--            end if;
+--
+--           if decoded_instruction_LS(SW_bit_position) = '1' or
+--              decoded_instruction_LS(SH_bit_position) = '1' or
+--              decoded_instruction_LS(SB_bit_position) = '1' then
+--             write(row0, rs2(instr_word_IE_int));
+--             write(row0, string'(","));
+--             write(row0, string'(",0x"));
+--             hwrite(row0, S_imm(instr_word_IE_int));
+--             write(row0, string'("(x"));
+--             write(row0, rs1(instr_word_IE_int));
+--             write(row0, string'(")"));
+--             write(row0, ht);
+--             write(row0, ht);
+--             write(row0, ht);
+--             write(row0, string'("rs1=0x"));
+--             hwrite(row0, RS1_Data_IE_int);
+--             write(row0, string'("      rs2=0x"));
+--             hwrite(row0, RS2_Data_IE_int);
+--             write(row0, string'("      addr=0x"));
+--             hwrite(row0, tracer_result);
+--           end if;
+--
+--            if decoded_instruction_LS(AMOSWAP_bit_position) = '1' then
+--              write(row0, string'("    amoswap x"));
+--              write(row0, rd(instr_word_IE_int));
+--              write(row0, string'(",x"));
+--              write(row0, rs2(instr_word_IE_int));
+--              write(row0, string'(",(x"));
+--              write(row0, rs1(instr_word_IE_int));
+--              write(row0, string'(")"));
+--              write(row0, string'("      rs1=0x"));
+--              hwrite(row0, RS1_Data_IE_int);
+--              write(row0, string'("      rs2=0x"));
+--              hwrite(row0, RS2_Data_IE_int);
+--              write(row0, string'("      rd=0x"));
+--              hwrite(row0, RD_Data_IE_int);
+--              write(row0, string'("      addr=0x"));
+--              hwrite(row0, tracer_result);
+--            end if;
+--
+--          when data_valid_waiting =>
+--        end case;
+--      end if;
+--
+--     ----------------------------------------------------------------------- Write Line -------------------------------------------------------------
+--    file_open(trace_o, filenames(harc_EXEC_int), append_mode);
+--     for i in 0 to THREAD_POOL_SIZE-1 loop
+--       if harc_EXEC_int = i then  
+--         if (instr_rvalid_IE_int = '1') then
+--           if i = 0 then
+--             writeline(file_handler0, row0);  -- Writes line to instr. trace file
+--           elsif i = 1 then
+--             writeline(file_handler1, row0);  -- Writes line to instr. trace file
+--           elsif i = 2 then
+--             writeline(file_handler2, row0);  -- Writes line to instr. trace file
+--           elsif i = 3 then
+--             writeline(file_handler3, row0);  -- Writes line to instr. trace file
+--           end if;
+--           writeline(trace_o, row0);
+--         end if;
+--       end if;
+--     end loop;
+--    file_close (trace_o);
+--     ------------------------------------------------------------------------------------------------------------------------------------------------
+--
+--    end if;  -- reset, clk_i
+--  end process;
+--  
+--  
+--
+--  ----------------------------------------------------------------------------------------------------
+--  --  ████████╗██████╗  █████╗ ███████╗██████╗     ██████╗ ███████╗███████╗██╗   ██╗██╗  ████████╗  --
+--  --  ╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔══██╗    ██╔══██╗██╔════╝██╔════╝██║   ██║██║  ╚══██╔══╝  --
+--  --     ██║   ██████╔╝███████║█████╗  ██████╔╝    ██████╔╝█████╗  ███████╗██║   ██║██║     ██║     --
+--  --     ██║   ██╔══██╗██╔══██║██╔══╝  ██╔══██╗    ██╔══██╗██╔══╝  ╚════██║██║   ██║██║     ██║     --
+--  --     ██║   ██║  ██║██║  ██║███████╗██║  ██║    ██║  ██║███████╗███████║╚██████╔╝███████╗██║     --
+--  --     ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝    ╚═╝  ╚═╝╚══════╝╚══════╝ ╚═════╝ ╚══════╝╚═╝     --
+--  ----------------------------------------------------------------------------------------------------
+--
+--
+--  Tracer_Comb : process(
+--                        state_IE, IE_instr_req, core_busy_IE_lat, irq_pending, decoded_instruction_IE, 
+--                        instr_word_ie_int, rs1_data_ie_int, rs2_data_ie_int, pc_IE_int, LS_instr_req,
+--                        state_LS_int, decoded_instruction_LS
+--                       ) --VHDL1993
+--  -- also implements the delay slot counters and some aux signals
+--  begin
+--
+--    IE_instr                        <= '0';
+--    LSU_instr                       <= '0';
+--    rs1_valid                       <= '0';
+--    rs2_valid                       <= '0';
+--    rd_read_only_valid              <= '0';
+--    rd_valid                        <= '0';
+--
+--    case state_IE is                  -- stage status
+--      when normal =>
+--        if ie_instr_req = '0' and core_busy_IE_lat = '0' then
+--        elsif irq_pending(harc_EXEC_int) = '1' then
+--        else -- process the instruction
+--          IE_instr <= '1';
+--          -- TRACE IF EXECUTE INSTRUCTIONS ---------------------
+--
+--          if decoded_instruction_IE(ADDI_bit_position)  = '1'  then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)+signed(I_immediate(instr_word_IE_int)));
+--          end if;
+--
+--          if decoded_instruction_IE(SLTI_bit_position)  = '1'  then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            if (signed(RS1_Data_IE_int) < signed (I_immediate(instr_word_IE_int))) then
+--              tracer_result <= std_logic_vector(to_unsigned(1, 32));
+--            else
+--              tracer_result <= std_logic_vector(to_unsigned(0, 32));
+--            end if;
+--          end if;
+--
+--          if decoded_instruction_IE(SLTIU_bit_position)  = '1'  then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            if (unsigned(RS1_Data_IE_int) < unsigned (I_immediate(instr_word_IE_int))) then
+--              tracer_result <= std_logic_vector(to_unsigned(1, 32));
+--            else
+--              tracer_result <= std_logic_vector(to_unsigned(0, 32));
+--            end if;
+--          end if;
+--
+--          if decoded_instruction_IE(ANDI_bit_position)  = '1'  then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= RS1_Data_IE_int and I_immediate(instr_word_IE_int);
+--          end if;
+--
+--          if decoded_instruction_IE(ORI_bit_position)  = '1'  then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= RS1_Data_IE_int or I_immediate(instr_word_IE_int);
+--          end if;
+--
+--          if decoded_instruction_IE(XORI_bit_position)  = '1'  then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= RS1_Data_IE_int xor I_immediate(instr_word_IE_int);
+--          end if;
+--
+--          if decoded_instruction_IE(SLLI_bit_position)  = '1'  then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) sll to_integer(unsigned(SHAMT(instr_word_IE_int))));
+--          end if;
+--
+--          if decoded_instruction_IE(SRLI7_bit_position)  = '1'  then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) srl to_integer(unsigned(SHAMT(instr_word_IE_int))));
+--          end if;
+--
+--          if decoded_instruction_IE(SRAI7_bit_position)  = '1'  then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) sra to_integer(unsigned(SHAMT(instr_word_IE_int))));
+--          end if;
+--
+--          if decoded_instruction_IE(LUI_bit_position) = '1' then
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= std_logic_vector(unsigned(U_immediate(instr_word_IE_int)));
+--          end if;
+--
+--          if decoded_instruction_IE(AUIPC_bit_position) = '1' then
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= std_logic_vector(unsigned(U_immediate(instr_word_IE_int))+unsigned(pc_IE_int));
+--          end if;
+--
+--          if decoded_instruction_IE(ADD7_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)+signed(RS2_Data_IE_int));
+--          end if;
+--
+--          if decoded_instruction_IE(SUB7_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)-signed(RS2_Data_IE_int));
+--          end if;
+--
+--          if decoded_instruction_IE(SLT_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            if (signed(RS1_Data_IE_int) < signed(RS2_Data_IE_int)) then
+--              tracer_result <= std_logic_vector(to_unsigned(1, 32));
+--            else
+--              tracer_result <= std_logic_vector(to_unsigned(0, 32));
+--            end if;
+--          end if;
+--
+--          if decoded_instruction_IE(SLTU_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            if (unsigned(RS1_Data_IE_int) < unsigned(RS2_Data_IE_int)) then
+--              tracer_result <= std_logic_vector(to_unsigned(1, 32));
+--            else
+--              tracer_result <= std_logic_vector(to_unsigned(0, 32));
+--            end if;
+--          end if;
+--
+--          if decoded_instruction_IE(ANDD_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= RS1_Data_IE_int and RS2_Data_IE_int;
+--          end if;
+--
+--          if decoded_instruction_IE(ORR_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= RS1_Data_IE_int or RS2_Data_IE_int;
+--          end if;
+--
+--          if decoded_instruction_IE(XORR_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= RS1_Data_IE_int xor RS2_Data_IE_int;
+--          end if;
+--
+--          if decoded_instruction_IE(SLLL_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) sll to_integer(unsigned(RS2_Data_IE_int(4 downto 0))));
+--          end if;
+--
+--          if decoded_instruction_IE(SRLL7_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) srl to_integer(unsigned(RS2_Data_IE_int(4 downto 0))));
+--          end if;
+--
+--          if decoded_instruction_IE(SRAA7_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= to_stdlogicvector(to_bitvector(RS1_Data_IE_int) sra to_integer(unsigned(RS2_Data_IE_int(4 downto 0))));
+--          end if;
+--
+--          if decoded_instruction_IE(FENCE_bit_position) = '1' or decoded_instruction_IE(FENCEI_bit_position) = '1' then
+--          end if;
+--
+--          if decoded_instruction_IE(JAL_bit_position) = '1' then  -- JAL instruction
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(UJ_immediate(instr_word_IE_int)));
+--          end if;
+--
+--          if decoded_instruction_IE(JALR_bit_position) = '1' then  --JALR instruction
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)+signed(I_immediate(instr_word_IE_int)));
+--          end if;
+--
+--          if decoded_instruction_IE(BEQ_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            if (signed(RS1_Data_IE_int) = signed(RS2_Data_IE_int)) then
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
+--            else
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);                
+--            end if;
+--          end if;
+--
+--          if decoded_instruction_IE(BNE_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            if (signed(RS1_Data_IE_int) /= signed(RS2_Data_IE_int)) then
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
+--            else
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);  
+--            end if;
+--          end if;
+--
+--          if decoded_instruction_IE(BLT_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            if (signed(RS1_Data_IE_int) < signed(RS2_Data_IE_int)) then
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
+--            else
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);  
+--            end if;
+--          end if;
+--
+--          if decoded_instruction_IE(BLTU_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            if (unsigned(RS1_Data_IE_int) < unsigned(RS2_Data_IE_int)) then
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
+--            else
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);  
+--            end if;
+--          end if;
+--
+--          if decoded_instruction_IE(BGE_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            if (signed(RS1_Data_IE_int) >= signed(RS2_Data_IE_int)) then
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
+--            else
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);  
+--            end if;
+--          end if;
+--
+--          if decoded_instruction_IE(BGEU_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            if (signed(RS1_Data_IE_int) >= signed(RS2_Data_IE_int)) then
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+signed(B_immediate(instr_word_IE_int)));
+--            else
+--              tracer_result <= std_logic_vector(signed(pc_IE_int)+4);  
+--            end if;
+--          end if;
+--
+--          if decoded_instruction_IE(SW_MIP_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--          end if;
+--
+--          if decoded_instruction_IE(CSRRW_bit_position) = '1' or decoded_instruction_IE(CSRRWI_bit_position) = '1' or
+--             decoded_instruction_IE(CSRRC_bit_position) = '1' or decoded_instruction_IE(CSRRCI_bit_position) = '1' or
+--             decoded_instruction_IE(CSRRS_bit_position) = '1' or decoded_instruction_IE(CSRRSI_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--          end if;
+--
+--          if decoded_instruction_IE(ECALL_bit_position) = '1' then
+--          end if;
+--
+--          if decoded_instruction_IE(EBREAK_bit_position) = '1' then
+--          end if;
+--
+--          if decoded_instruction_IE(MRET_bit_position) = '1' then
+--          end if;
+--
+--          if decoded_instruction_IE(WFI_bit_position) = '1' then
+--          end if;
+--
+--          if decoded_instruction_IE(ILL_bit_position) = '1' then  -- ILLEGAL_INSTRUCTION
+--          end if;
+--
+--          if decoded_instruction_IE(NOP_bit_position) = '1' then
+--          end if;
+--
+--          if decoded_instruction_IE(MUL_bit_position)    = '1' or 
+--             decoded_instruction_IE(MULH_bit_position)   = '1' or
+--             decoded_instruction_IE(MULHU_bit_position)  = '1' or
+--             decoded_instruction_IE(MULHSU_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--          end if;
+--
+--          if decoded_instruction_IE(MUL_bit_position) = '1' or 
+--             decoded_instruction_IE(MULH_bit_position) = '1' then
+--            tracer_mul_result <= std_logic_vector(signed(RS1_Data_IE_int)*signed(RS2_Data_IE_int));
+--          end if;
+--
+--          if decoded_instruction_IE(MULHU_bit_position) = '1' then
+--            tracer_mul_result <= std_logic_vector(unsigned(RS1_Data_IE_int)*unsigned(RS2_Data_IE_int));
+--          end if;
+--
+--          if decoded_instruction_IE(MULHSU_bit_position) = '1' then
+--            tracer_mul_result <= x"FFFFFFFF_00000000";
+--          end if;
+--
+--          if decoded_instruction_IE(DIV_bit_position)  = '1' or 
+--             decoded_instruction_IE(REM_bit_position)  = '1' or
+--             decoded_instruction_IE(DIVU_bit_position) = '1' or 
+--             decoded_instruction_IE(REMU_bit_position) = '1' then
+--            rs1_valid <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid  <= '1' when rd(instr_word_IE_int)  /= 0;
+--          end if;
+--
+--        -- EXECUTE OF INSTRUCTION (END)
+--        end if;  -- instr_rvalid_IE values 
+--
+--      when others =>
+--
+--    end case;  -- fsm_IE state cases
+--
+--    if LS_instr_req = '1' then
+--      LSU_instr <= '1';
+--      case state_LS_int is  
+--        when normal =>
+--          if decoded_instruction_LS(LW_bit_position) = '1' or
+--             decoded_instruction_LS(LH_bit_position) = '1' or decoded_instruction_LS(LHU_bit_position) = '1' or 
+--             decoded_instruction_LS(LB_bit_position) = '1' or decoded_instruction_LS(LBU_bit_position) = '1' then
+--            rs1_valid           <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rd_valid            <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)+signed(I_immediate(instr_word_IE_int)));
+--          end if;
+--
+--          if decoded_instruction_LS(SW_bit_position) = '1' or
+--             decoded_instruction_LS(SH_bit_position) = '1' or 
+--             decoded_instruction_LS(SB_bit_position) = '1' then
+--            rs1_valid           <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid           <= '1' when rs2(instr_word_IE_int) /= 0;
+--            tracer_result <= std_logic_vector(signed(RS1_Data_IE_int)+signed(S_immediate(instr_word_IE_int)));
+--          end if;
+--
+--          if decoded_instruction_LS(AMOSWAP_bit_position) = '1' then
+--            rs1_valid           <= '1' when rs1(instr_word_IE_int) /= 0;
+--            rs2_valid           <= '1' when rs2(instr_word_IE_int) /= 0;
+--            rd_valid            <= '1' when rd(instr_word_IE_int)  /= 0;
+--            tracer_result <= RS1_Data_IE_int;
+--          end if;
+--
+--        when data_valid_waiting =>
+--      end case;
+--    end if;
+--
+--  end process;
+--  end generate Tracer_generate;
 
   EXEC_instr <= IE_instr or LSU_instr;
 

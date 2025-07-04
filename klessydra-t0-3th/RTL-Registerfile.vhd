@@ -66,8 +66,7 @@ entity REGISTERFILE is
     RS1_Data_IE             : out std_logic_vector(31 downto 0);
     RS2_Data_IE             : out std_logic_vector(31 downto 0);
     RD_Data_IE              : out std_logic_vector(31 downto 0);
-    data_addr_internal_IE   : out std_logic_vector(31 downto 0);
-    regfile                 : out regfile_array
+    data_addr_internal_IE   : out std_logic_vector(31 downto 0)
     );
 end entity;  ------------------------------------------
 
@@ -131,9 +130,6 @@ architecture RF of REGISTERFILE is
   end;
 
 begin
-
-  -- connecting internal signals
-  regfile <= regfile_int;
 
   ------------------------------------------------------------
   --  ██████╗ ███████╗ ██████╗ ███████╗██╗██╗     ███████╗  --

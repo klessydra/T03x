@@ -27,6 +27,7 @@ entity IE_STAGE is
   generic(
     THREAD_POOL_SIZE_GLOBAL   : natural;
     THREAD_POOL_SIZE          : natural;
+    debug_en                  : natural;
     RV32M                     : natural;
     RF_CEIL                   : natural
   );
@@ -64,6 +65,16 @@ entity IE_STAGE is
     ie_instr_req              : in  std_logic;
     MHARTID                   : in  MHARTID_array;
     MSTATUS                   : in  MSTATUS_array;
+    ------------------------------------------------------------------------------
+    single_stepping           : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    DEBUG_MODE                : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    wfi_exec                  : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0); 
+    halt_req_wire             : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    halt_req                  : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    irq_en_single_step        : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    debug_pc_taken_wire       : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    dret_instr                : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0); 
+    ------------------------------------------------------------------------------
     harc_EXEC                 : in  integer range THREAD_POOL_SIZE-1 downto 0;
     instr_rvalid_IE           : in  std_logic;  -- validity bit at IE input
     WB_EN_next_ID             : in  std_logic;
@@ -106,7 +117,7 @@ entity IE_STAGE is
     pc_WB                     : out std_logic_vector(31 downto 0);
     state_IE                  : out fsm_IE_states;
     -- branch prediction
-    halt_update_IE            : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+    halt_update_IE            : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0); --inutilizzato
     branch_taken              : out std_logic
   );
 end entity;  ------------------------------------------
@@ -177,6 +188,8 @@ architecture EXECUTE of IE_STAGE is
   signal logic_op_A                 : std_logic_Vector(31 downto 0);
   signal logic_op_B                 : std_logic_Vector(31 downto 0);
 
+  signal wfi_exec_int               : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+
   signal halt_update_IE_wire        : std_logic_vector(harc_range);
   signal halt_update_IE_pending     : std_logic_vector(harc_range);
 
@@ -216,6 +229,9 @@ begin
   MUL_WB_EN_wire <= MUL_WB_EN_wire_int;
   core_busy_IE <= core_busy_IE_int;
 
+  debug_wfi_ex_gen: if debug_en = 1 generate
+    wfi_exec            <= wfi_exec_int;
+  end generate debug_wfi_ex_gen;
 
   instr_rvalid_IE_int <= (instr_rvalid_IE or core_busy_IE_lat); -- AAA in case of non-hetergenous cluster, maybe a dual core for example, the core_enable_i should not flush the IE istruction.
 
@@ -227,282 +243,562 @@ begin
   --  ██║███████╗    ███████║   ██║   ██║ ╚████║╚██████╗  --
   --  ╚═╝╚══════╝    ╚══════╝   ╚═╝   ╚═╝  ╚═══╝ ╚═════╝  --
   ----------------------------------------------------------
-
-  fsm_IE_sync : process(clk_i, rst_ni)
-  begin
-    if rst_ni = '0' then
-      IE_WB                  <= std_logic_vector(to_unsigned(0, 32));
-      IE_WB_EN               <= '0';
-      MUL_WB_EN              <= '0';
-      --instruction_counter    <= std_logic_vector(to_unsigned(0, 64));
-      core_busy_IE_lat       <= '0';
-      WB_EN_next_IE          <= '0';
-      sw_irq_count           <= '0';
-      halt_update_IE         <= (others => '0');
-      halt_update_IE_pending <= (others => '0');
-    elsif rising_edge(clk_i) then
-      IE_WB_EN         <= '0';
-      MUL_WB_EN        <= '0';
-      WB_EN_next_IE    <= '0';
-      core_busy_IE_lat <= core_busy_IE_int;
-      -- Branch miss handling ---------------------------------------------
-      if instr_gnt_i = '1' then
-        halt_update_IE <= halt_update_IE_wire or halt_update_IE_pending;
-        halt_update_IE_pending <= (others => '0'); -- AAA maybe make the pending signal into 1 bit instead of harc_range
-      else
-        halt_update_IE_pending <= halt_update_IE_wire; -- AAA maybe make the wire into a single wire istead of harc_range
-      end if; 
-
-      case state_IE_int is  -- stage state
-        when sleep =>
-          null;
-        when normal =>
-          -- check if there is a valid instruction and the thread it belongs to is not in a delay slot: 
-          if  ie_instr_req = '0' and core_busy_IE_lat = '0' then
-            -- in a generic version we would have conditions on busy_WB 
-            -- in all states of the IE stage, and similarly in the comb process, just
-            -- like we did in the ID stage.
-          elsif instr_rvalid_IE_int = '0' then
+  debug_ie_sin_nen: if debug_en = 0 generate
+    fsm_IE_sync : process(clk_i, rst_ni)
+    begin
+      if rst_ni = '0' then
+        IE_WB                  <= std_logic_vector(to_unsigned(0, 32));
+        IE_WB_EN               <= '0';
+        MUL_WB_EN              <= '0';
+        --instruction_counter    <= std_logic_vector(to_unsigned(0, 64));
+        core_busy_IE_lat       <= '0';
+        WB_EN_next_IE          <= '0';
+        sw_irq_count           <= '0';
+        halt_update_IE         <= (others => '0');
+        halt_update_IE_pending <= (others => '0');
+      elsif rising_edge(clk_i) then
+        IE_WB_EN         <= '0';
+        MUL_WB_EN        <= '0';
+        WB_EN_next_IE    <= '0';
+        core_busy_IE_lat <= core_busy_IE_int;
+        -- Branch miss handling ---------------------------------------------
+        if instr_gnt_i = '1' then
+          halt_update_IE <= halt_update_IE_wire or halt_update_IE_pending;
+          halt_update_IE_pending <= (others => '0'); -- AAA maybe make the pending signal into 1 bit instead of harc_range
+        else
+          halt_update_IE_pending <= halt_update_IE_wire; -- AAA maybe make the wire into a single wire istead of harc_range
+        end if; 
+  
+        case state_IE_int is  -- stage state
+          when sleep =>
             null;
-          elsif irq_pending(harc_EXEC) = '1' then
-            -- manage irq as an absolute branch to MTVEC, also defining mepc value properly in program counter unit
-            -- irq is served only if we are not in a delay slot for the interrupted harc
-            -- for simplicity presently only harc 0 is interrupted (decided in program counter unit)
-            -- the current valid instruction is discarded, only its pc value gets used for mepc
-          else
-            IE_WB_EN           <= IE_WB_EN_wire_int;
-            MUL_WB_EN          <= MUL_WB_EN_wire_int;
-            pc_WB              <= pc_IE;
-            instr_word_IE_WB   <= instr_word_IE;
-            harc_IE_WB         <= harc_EXEC;
-            -- misaligned_err      <= '0';
-
-            -- EXECUTE OF INSTRUCTION -------------------------------------------
-
-            -------------------------- ADDER ------------------------------
-            if decoded_instruction_IE(ADDI_bit_position)  = '1' or
-               decoded_instruction_IE(ADD7_bit_position)  = '1' or
-               decoded_instruction_IE(SUB7_bit_position)  = '1' or
-               decoded_instruction_IE(AUIPC_bit_position) = '1' or
-               decoded_instruction_IE(JAL_bit_position)   = '1' or 
-               decoded_instruction_IE(JALR_bit_position)  = '1' then
-              IE_WB <= std_logic_vector(signed(add_op_A)+signed(add_op_B));
-            end if;
-            ---------------------------------------------------------------
-
-            -----------------------  SHIFTERS -----------------------------
-            if decoded_instruction_IE(SLLI_bit_position) = '1' or
-               decoded_instruction_IE(SLLL_bit_position) = '1' then
-              IE_WB <= to_stdlogicvector(to_bitvector(sl_op_A) sll to_integer(unsigned(sl_op_B)));
-            end if;
-            if decoded_instruction_IE(SRLI7_bit_position) = '1' or
-               decoded_instruction_IE(SRLL7_bit_position) = '1' then
-              IE_WB <= to_stdlogicvector(to_bitvector(sr_op_A) srl to_integer(unsigned(sr_op_B)));
-            end if;
-            if decoded_instruction_IE(SRAI7_bit_position) = '1' or
-               decoded_instruction_IE(SRAA7_bit_position) = '1' then
-              IE_WB <= to_stdlogicvector(to_bitvector(sr_op_A) sra to_integer(unsigned(sr_op_B)));
-            end if;
-            --------------------------------------------------------------
-
-            -------------------- LOGIC UNITS -----------------------------
-            if decoded_instruction_IE(ANDI_bit_position) = '1' or
-               decoded_instruction_IE(ANDD_bit_position) = '1' then
-              IE_WB <= logic_op_A and logic_op_B;
-            end if;
-
-            if decoded_instruction_IE(ORI_bit_position) = '1' or
-               decoded_instruction_IE(ORR_bit_position) = '1' then
-              IE_WB <= logic_op_A or logic_op_B;
-            end if;
-
-            if decoded_instruction_IE(XORI_bit_position) = '1' or
-               decoded_instruction_IE(XORR_bit_position) = '1' then
-              IE_WB <= logic_op_A xor logic_op_B;
-            end if;
-            --------------------------------------------------------------
-
-
-            if decoded_instruction_IE(SLTI_bit_position) = '1' then
-              if (signed(RS1_Data_IE) < signed (I_immediate(instr_word_IE))) then
-                IE_WB <= std_logic_vector(to_unsigned(1, 32));
-              else
-                IE_WB <= std_logic_vector(to_unsigned(0, 32));
+          when normal =>
+            -- check if there is a valid instruction and the thread it belongs to is not in a delay slot: 
+            if  ie_instr_req = '0' and core_busy_IE_lat = '0' then
+              -- in a generic version we would have conditions on busy_WB 
+              -- in all states of the IE stage, and similarly in the comb process, just
+              -- like we did in the ID stage.
+            elsif instr_rvalid_IE_int = '0' then
+              null;
+            elsif irq_pending(harc_EXEC) = '1' then
+              -- manage irq as an absolute branch to MTVEC, also defining mepc value properly in program counter unit
+              -- irq is served only if we are not in a delay slot for the interrupted harc
+              -- for simplicity presently only harc 0 is interrupted (decided in program counter unit)
+              -- the current valid instruction is discarded, only its pc value gets used for mepc
+            else
+              IE_WB_EN           <= IE_WB_EN_wire_int;
+              MUL_WB_EN          <= MUL_WB_EN_wire_int;
+              pc_WB              <= pc_IE;
+              instr_word_IE_WB   <= instr_word_IE;
+              harc_IE_WB         <= harc_EXEC;
+              -- misaligned_err      <= '0';
+  
+              -- EXECUTE OF INSTRUCTION -------------------------------------------
+  
+              -------------------------- ADDER ------------------------------
+              if decoded_instruction_IE(ADDI_bit_position)  = '1' or
+                 decoded_instruction_IE(ADD7_bit_position)  = '1' or
+                 decoded_instruction_IE(SUB7_bit_position)  = '1' or
+                 decoded_instruction_IE(AUIPC_bit_position) = '1' or
+                 decoded_instruction_IE(JAL_bit_position)   = '1' or 
+                 decoded_instruction_IE(JALR_bit_position)  = '1' then
+                IE_WB <= std_logic_vector(signed(add_op_A)+signed(add_op_B));
               end if;
-            end if;
-
-            if decoded_instruction_IE(SLTIU_bit_position) = '1' then
-              if (unsigned(RS1_Data_IE) < unsigned (I_immediate(instr_word_IE))) then
-                IE_WB <= std_logic_vector(to_unsigned(1, 32));
-              else
-                IE_WB <= std_logic_vector(to_unsigned(0, 32));
+              ---------------------------------------------------------------
+  
+              -----------------------  SHIFTERS -----------------------------
+              if decoded_instruction_IE(SLLI_bit_position) = '1' or
+                 decoded_instruction_IE(SLLL_bit_position) = '1' then
+                IE_WB <= to_stdlogicvector(to_bitvector(sl_op_A) sll to_integer(unsigned(sl_op_B)));
               end if;
-            end if;
-
-            if decoded_instruction_IE(LUI_bit_position) = '1' then
-              IE_WB <= U_immediate(instr_word_IE);
-            end if;
-
-            if decoded_instruction_IE(SLT_bit_position) = '1' then
-              if pass_BLT = '1' then
-                IE_WB <= std_logic_vector(to_unsigned(1, 32));
-              else
-                IE_WB <= std_logic_vector(to_unsigned(0, 32));
+              if decoded_instruction_IE(SRLI7_bit_position) = '1' or
+                 decoded_instruction_IE(SRLL7_bit_position) = '1' then
+                IE_WB <= to_stdlogicvector(to_bitvector(sr_op_A) srl to_integer(unsigned(sr_op_B)));
               end if;
-            end if;
-
-            if decoded_instruction_IE(SLTU_bit_position) = '1' then
-              if pass_BLTU = '1' then
-                IE_WB <= std_logic_vector(to_unsigned(1, 32));
-              else
-                IE_WB <= std_logic_vector(to_unsigned(0, 32));
+              if decoded_instruction_IE(SRAI7_bit_position) = '1' or
+                 decoded_instruction_IE(SRAA7_bit_position) = '1' then
+                IE_WB <= to_stdlogicvector(to_bitvector(sr_op_A) sra to_integer(unsigned(sr_op_B)));
               end if;
-            end if;
-
-            -----------------------------------------------------------
-
-            --------------------- CSR OPS ---------------------------
-            if decoded_instruction_IE(CSRRC_bit_position)  = '1' or 
-               decoded_instruction_IE(CSRRS_bit_position)  = '1' or 
-               decoded_instruction_IE(CSRRW_bit_position)  = '1' or
-               decoded_instruction_IE(CSRRSI_bit_position) = '1' or 
-               decoded_instruction_IE(CSRRCI_bit_position) = '1' or 
-               decoded_instruction_IE(CSRRWI_bit_position) = '1' then
-              if zero_rd = '0' then
-                WB_EN_next_IE <= '1';
+              --------------------------------------------------------------
+  
+              -------------------- LOGIC UNITS -----------------------------
+              if decoded_instruction_IE(ANDI_bit_position) = '1' or
+                 decoded_instruction_IE(ANDD_bit_position) = '1' then
+                IE_WB <= logic_op_A and logic_op_B;
               end if;
-            end if;
-
-            -------------------------------------------------------
-
-            if decoded_instruction_IE(ECALL_bit_position) = '1' then
-              ie_except_data <= ECALL_EXCEPT_CODE;
-            end if;
-
-            if decoded_instruction_IE(ILL_bit_position) = '1' then
-              ie_except_data <= ILLEGAL_INSN_EXCEPT_CODE;
-            end if;
-
-            if RV32M = 1 then
-              if decoded_instruction_IE(MUL_bit_position) = '1' then
-                MUL_WB <= MUL_low;
+  
+              if decoded_instruction_IE(ORI_bit_position) = '1' or
+                 decoded_instruction_IE(ORR_bit_position) = '1' then
+                IE_WB <= logic_op_A or logic_op_B;
               end if;
-
-              if decoded_instruction_IE(MULH_bit_position)   = '1' or 
-                 decoded_instruction_IE(MULHU_bit_position)  = '1' or
-                 decoded_instruction_IE(MULHSU_bit_position) = '1' then
-                case state_mulh is
-                  when mult =>
-                    WB_EN_next_IE <= '1';
-                  when others =>
-                    null;
-                end case;
-                if core_busy_IE_int = '0' then
-                  IE_WB  <= MUL(63 downto 32);
+  
+              if decoded_instruction_IE(XORI_bit_position) = '1' or
+                 decoded_instruction_IE(XORR_bit_position) = '1' then
+                IE_WB <= logic_op_A xor logic_op_B;
+              end if;
+              --------------------------------------------------------------
+  
+  
+              if decoded_instruction_IE(SLTI_bit_position) = '1' then
+                if (signed(RS1_Data_IE) < signed (I_immediate(instr_word_IE))) then
+                  IE_WB <= std_logic_vector(to_unsigned(1, 32));
+                else
+                  IE_WB <= std_logic_vector(to_unsigned(0, 32));
                 end if;
               end if;
-
-              if decoded_instruction_IE(DIVU_bit_position) = '1' or
-                 decoded_instruction_IE(DIV_bit_position)  = '1' or
-                 decoded_instruction_IE(REMU_bit_position) = '1' or
-                 decoded_instruction_IE(REM_bit_position)  = '1' then
-                if div_count_wire(5) = '1' or div_bypass_en = '1' then
+  
+              if decoded_instruction_IE(SLTIU_bit_position) = '1' then
+                if (unsigned(RS1_Data_IE) < unsigned (I_immediate(instr_word_IE))) then
+                  IE_WB <= std_logic_vector(to_unsigned(1, 32));
+                else
+                  IE_WB <= std_logic_vector(to_unsigned(0, 32));
+                end if;
+              end if;
+  
+              if decoded_instruction_IE(LUI_bit_position) = '1' then
+                IE_WB <= U_immediate(instr_word_IE);
+              end if;
+  
+              if decoded_instruction_IE(SLT_bit_position) = '1' then
+                if pass_BLT = '1' then
+                  IE_WB <= std_logic_vector(to_unsigned(1, 32));
+                else
+                  IE_WB <= std_logic_vector(to_unsigned(0, 32));
+                end if;
+              end if;
+  
+              if decoded_instruction_IE(SLTU_bit_position) = '1' then
+                if pass_BLTU = '1' then
+                  IE_WB <= std_logic_vector(to_unsigned(1, 32));
+                else
+                  IE_WB <= std_logic_vector(to_unsigned(0, 32));
+                end if;
+              end if;
+  
+              -----------------------------------------------------------
+  
+              --------------------- CSR OPS ---------------------------
+              if decoded_instruction_IE(CSRRC_bit_position)  = '1' or 
+                 decoded_instruction_IE(CSRRS_bit_position)  = '1' or 
+                 decoded_instruction_IE(CSRRW_bit_position)  = '1' or
+                 decoded_instruction_IE(CSRRSI_bit_position) = '1' or 
+                 decoded_instruction_IE(CSRRCI_bit_position) = '1' or 
+                 decoded_instruction_IE(CSRRWI_bit_position) = '1' then
+                if zero_rd = '0' then
                   WB_EN_next_IE <= '1';
                 end if;
               end if;
-
-
-              if decoded_instruction_IE(DIVU_bit_position) = '1' then
-                if zero_rs2 = '1' then
-                  IE_WB  <= (others => '1');
-                elsif zero_rs1 = '1' then
-                  IE_WB <= (others => '0');
-                elsif pass_BEQ = '1' then
-                  IE_WB <= (31 downto 1 => '0') & '1';
-                elsif pass_BLTU = '1' then
-                  IE_WB <= (others => '0');
-                else
-                  IE_WB <= res(31 downto 0);
-                end if;
+  
+              -------------------------------------------------------
+  
+              if decoded_instruction_IE(ECALL_bit_position) = '1' then
+                ie_except_data <= ECALL_EXCEPT_CODE;
               end if;
-
-              if decoded_instruction_IE(DIV_bit_position) = '1' then
-                if zero_rs2 = '1' then
-                  IE_WB  <= (others => '1');
-                elsif zero_rs1 = '1' then
-                  IE_WB <= (others => '0');
-            --    elsif abs(signed(RS1_DATA_IE)) < abs(signed(RS2_DATA_IE)) then
-              --    IE_WB <= (others => '0');
-                elsif pass_BEQ = '1' then
-                  if RS2_DATA_IE(31) = RS1_DATA_IE(31) then
+  
+              if decoded_instruction_IE(ILL_bit_position) = '1' then
+                ie_except_data <= ILLEGAL_INSN_EXCEPT_CODE;
+              end if;
+  
+              if RV32M = 1 then
+                if decoded_instruction_IE(MUL_bit_position) = '1' then
+                  MUL_WB <= MUL_low;
+                end if;
+  
+                if decoded_instruction_IE(MULH_bit_position)   = '1' or 
+                   decoded_instruction_IE(MULHU_bit_position)  = '1' or
+                   decoded_instruction_IE(MULHSU_bit_position) = '1' then
+                  case state_mulh is
+                    when mult =>
+                      WB_EN_next_IE <= '1';
+                    when others =>
+                      null;
+                  end case;
+                  if core_busy_IE_int = '0' then
+                    IE_WB  <= MUL(63 downto 32);
+                  end if;
+                end if;
+  
+                if decoded_instruction_IE(DIVU_bit_position) = '1' or
+                   decoded_instruction_IE(DIV_bit_position)  = '1' or
+                   decoded_instruction_IE(REMU_bit_position) = '1' or
+                   decoded_instruction_IE(REM_bit_position)  = '1' then
+                  if div_count_wire(5) = '1' or div_bypass_en = '1' then
+                    WB_EN_next_IE <= '1';
+                  end if;
+                end if;
+  
+  
+                if decoded_instruction_IE(DIVU_bit_position) = '1' then
+                  if zero_rs2 = '1' then
+                    IE_WB  <= (others => '1');
+                  elsif zero_rs1 = '1' then
+                    IE_WB <= (others => '0');
+                  elsif pass_BEQ = '1' then
                     IE_WB <= (31 downto 1 => '0') & '1';
+                  elsif pass_BLTU = '1' then
+                    IE_WB <= (others => '0');
                   else
-                    IE_WB <= (31 downto 0 => '1');
-                  end if;
-                else
-                  if RS1_DATA_IE(31) = RS2_DATA_IE(31) then
                     IE_WB <= res(31 downto 0);
-                  else
-                    IE_WB <= std_logic_vector(unsigned(not(res(31 downto 0)))+1);
                   end if;
                 end if;
-              end if;
-
-              if decoded_instruction_IE(REMU_bit_position) = '1' then
-                if zero_rs2 = '1' then
-                  IE_WB <= RS1_Data_IE;
-                elsif zero_rs1 = '1' then
-                  IE_WB <= (others => '0');
-                elsif pass_BEQ = '1' then
-                  IE_WB <= (others => '0');
-                elsif pass_BLTU = '1' then
-                  IE_WB <= RS1_Data_IE;
-                else
-                  IE_WB <= res(63 downto 32);
+  
+                if decoded_instruction_IE(DIV_bit_position) = '1' then
+                  if zero_rs2 = '1' then
+                    IE_WB  <= (others => '1');
+                  elsif zero_rs1 = '1' then
+                    IE_WB <= (others => '0');
+              --    elsif abs(signed(RS1_DATA_IE)) < abs(signed(RS2_DATA_IE)) then
+                --    IE_WB <= (others => '0');
+                  elsif pass_BEQ = '1' then
+                    if RS2_DATA_IE(31) = RS1_DATA_IE(31) then
+                      IE_WB <= (31 downto 1 => '0') & '1';
+                    else
+                      IE_WB <= (31 downto 0 => '1');
+                    end if;
+                  else
+                    if RS1_DATA_IE(31) = RS2_DATA_IE(31) then
+                      IE_WB <= res(31 downto 0);
+                    else
+                      IE_WB <= std_logic_vector(unsigned(not(res(31 downto 0)))+1);
+                    end if;
+                  end if;
                 end if;
-              end if;
-
-              if decoded_instruction_IE(REM_bit_position) = '1' then
-                if zero_rs2 = '1' then
-                  IE_WB <= RS1_Data_IE;
-                elsif zero_rs1 = '1' then
-                  IE_WB <= (others => '0');
-                elsif pass_BEQ = '1' then
-                  IE_WB <= (others => '0');
-            --    elsif abs(signed(RS1_DATA_IE)) < abs(signed(RS2_DATA_IE)) then
-              --    IE_WB <= RS1_Data_IE;
-            --    elsif abs(signed(RS1_DATA_IE)) = abs(signed(RS2_DATA_IE)) then
-              --    IE_WB <= (others => '0');
-                else
-                  if RS1_DATA_IE(31) = '1' then
-                    IE_WB <= std_logic_vector(unsigned(not(res(63 downto 32)))+1);
+  
+                if decoded_instruction_IE(REMU_bit_position) = '1' then
+                  if zero_rs2 = '1' then
+                    IE_WB <= RS1_Data_IE;
+                  elsif zero_rs1 = '1' then
+                    IE_WB <= (others => '0');
+                  elsif pass_BEQ = '1' then
+                    IE_WB <= (others => '0');
+                  elsif pass_BLTU = '1' then
+                    IE_WB <= RS1_Data_IE;
                   else
                     IE_WB <= res(63 downto 32);
                   end if;
                 end if;
+  
+                if decoded_instruction_IE(REM_bit_position) = '1' then
+                  if zero_rs2 = '1' then
+                    IE_WB <= RS1_Data_IE;
+                  elsif zero_rs1 = '1' then
+                    IE_WB <= (others => '0');
+                  elsif pass_BEQ = '1' then
+                    IE_WB <= (others => '0');
+              --    elsif abs(signed(RS1_DATA_IE)) < abs(signed(RS2_DATA_IE)) then
+                --    IE_WB <= RS1_Data_IE;
+              --    elsif abs(signed(RS1_DATA_IE)) = abs(signed(RS2_DATA_IE)) then
+                --    IE_WB <= (others => '0');
+                  else
+                    if RS1_DATA_IE(31) = '1' then
+                      IE_WB <= std_logic_vector(unsigned(not(res(63 downto 32)))+1);
+                    else
+                      IE_WB <= res(63 downto 32);
+                    end if;
+                  end if;
+                end if;
               end if;
+  
+            -- EXECUTE OF INSTRUCTION (END) --------------------------
+            end if;  -- instr_rvalid_IE values
+            
+          when csr_instr_wait_state =>
+            if (csr_instr_done = '1' and csr_access_denied_o = '0') then
+              if zero_rd = '0' then
+                IE_WB_EN <= IE_WB_EN_wire_int;
+                IE_WB <= csr_rdata_o;
+              end if;
+            elsif (csr_instr_done = '1' and csr_access_denied_o = '1') then  -- ILLEGAL_INSTRUCTION
+              ie_except_data                       <= ILLEGAL_INSN_EXCEPT_CODE;
             end if;
+        end case;  -- fsm_IE state cases
+      end if;  -- reset, clk_i
+    end process;
+  end generate debug_ie_sin_nen;
 
-          -- EXECUTE OF INSTRUCTION (END) --------------------------
-          end if;  -- instr_rvalid_IE values
-          
-        when csr_instr_wait_state =>
-          if (csr_instr_done = '1' and csr_access_denied_o = '0') then
-            if zero_rd = '0' then
-              IE_WB_EN <= IE_WB_EN_wire_int;
-              IE_WB <= csr_rdata_o;
+  debug_ie_sin_en: if debug_en = 1 generate
+    fsm_IE_sync : process(clk_i, rst_ni)
+    begin
+      if rst_ni = '0' then
+        IE_WB                  <= std_logic_vector(to_unsigned(0, 32));
+        IE_WB_EN               <= '0';
+        MUL_WB_EN              <= '0';
+        --instruction_counter    <= std_logic_vector(to_unsigned(0, 64));
+        core_busy_IE_lat       <= '0';
+        WB_EN_next_IE          <= '0';
+        sw_irq_count           <= '0';
+        halt_update_IE         <= (others => '0');
+        halt_update_IE_pending <= (others => '0');
+      elsif rising_edge(clk_i) then
+        IE_WB_EN         <= '0';
+        MUL_WB_EN        <= '0';
+        WB_EN_next_IE    <= '0';
+        core_busy_IE_lat <= core_busy_IE_int;
+        -- Branch miss handling ---------------------------------------------
+        if instr_gnt_i = '1' then
+          halt_update_IE <= halt_update_IE_wire or halt_update_IE_pending;
+          halt_update_IE_pending <= (others => '0'); -- AAA maybe make the pending signal into 1 bit instead of harc_range
+        else
+          halt_update_IE_pending <= halt_update_IE_wire; -- AAA maybe make the wire into a single wire istead of harc_range
+        end if; 
+  
+        case state_IE_int is  -- stage state
+          when sleep =>
+            null;
+          when normal =>
+            -- check if there is a valid instruction and the thread it belongs to is not in a delay slot: 
+            if  ie_instr_req = '0' and core_busy_IE_lat = '0' then
+              -- in a generic version we would have conditions on busy_WB 
+              -- in all states of the IE stage, and similarly in the comb process, just
+              -- like we did in the ID stage.
+            elsif instr_rvalid_IE_int = '0'  or ((halt_req(harc_EXEC) = '1' or halt_req_wire(harc_EXEC) = '1') and single_stepping(harc_EXEC) = '0') then
+            elsif irq_pending(harc_EXEC) = '1' and DEBUG_MODE(harc_EXEC) = '0' and irq_en_single_step(harc_EXEC) = '1' then
+              -- manage irq as an absolute branch to MTVEC, also defining mepc value properly in program counter unit
+              -- irq is served only if we are not in a delay slot for the interrupted harc
+              -- for simplicity presently only harc 0 is interrupted (decided in program counter unit)
+              -- the current valid instruction is discarded, only its pc value gets used for mepc
+            else
+              IE_WB_EN           <= IE_WB_EN_wire_int;
+              MUL_WB_EN          <= MUL_WB_EN_wire_int;
+              pc_WB              <= pc_IE;
+              instr_word_IE_WB   <= instr_word_IE;
+              harc_IE_WB         <= harc_EXEC;
+              -- misaligned_err      <= '0';
+  
+              -- EXECUTE OF INSTRUCTION -------------------------------------------
+  
+              -------------------------- ADDER ------------------------------
+              if decoded_instruction_IE(ADDI_bit_position)  = '1' or
+                 decoded_instruction_IE(ADD7_bit_position)  = '1' or
+                 decoded_instruction_IE(SUB7_bit_position)  = '1' or
+                 decoded_instruction_IE(AUIPC_bit_position) = '1' or
+                 decoded_instruction_IE(JAL_bit_position)   = '1' or 
+                 decoded_instruction_IE(JALR_bit_position)  = '1' then
+                IE_WB <= std_logic_vector(signed(add_op_A)+signed(add_op_B));
+              end if;
+              ---------------------------------------------------------------
+  
+              -----------------------  SHIFTERS -----------------------------
+              if decoded_instruction_IE(SLLI_bit_position) = '1' or
+                 decoded_instruction_IE(SLLL_bit_position) = '1' then
+                IE_WB <= to_stdlogicvector(to_bitvector(sl_op_A) sll to_integer(unsigned(sl_op_B)));
+              end if;
+              if decoded_instruction_IE(SRLI7_bit_position) = '1' or
+                 decoded_instruction_IE(SRLL7_bit_position) = '1' then
+                IE_WB <= to_stdlogicvector(to_bitvector(sr_op_A) srl to_integer(unsigned(sr_op_B)));
+              end if;
+              if decoded_instruction_IE(SRAI7_bit_position) = '1' or
+                 decoded_instruction_IE(SRAA7_bit_position) = '1' then
+                IE_WB <= to_stdlogicvector(to_bitvector(sr_op_A) sra to_integer(unsigned(sr_op_B)));
+              end if;
+              --------------------------------------------------------------
+  
+              -------------------- LOGIC UNITS -----------------------------
+              if decoded_instruction_IE(ANDI_bit_position) = '1' or
+                 decoded_instruction_IE(ANDD_bit_position) = '1' then
+                IE_WB <= logic_op_A and logic_op_B;
+              end if;
+  
+              if decoded_instruction_IE(ORI_bit_position) = '1' or
+                 decoded_instruction_IE(ORR_bit_position) = '1' then
+                IE_WB <= logic_op_A or logic_op_B;
+              end if;
+  
+              if decoded_instruction_IE(XORI_bit_position) = '1' or
+                 decoded_instruction_IE(XORR_bit_position) = '1' then
+                IE_WB <= logic_op_A xor logic_op_B;
+              end if;
+              --------------------------------------------------------------
+  
+  
+              if decoded_instruction_IE(SLTI_bit_position) = '1' then
+                if (signed(RS1_Data_IE) < signed (I_immediate(instr_word_IE))) then
+                  IE_WB <= std_logic_vector(to_unsigned(1, 32));
+                else
+                  IE_WB <= std_logic_vector(to_unsigned(0, 32));
+                end if;
+              end if;
+  
+              if decoded_instruction_IE(SLTIU_bit_position) = '1' then
+                if (unsigned(RS1_Data_IE) < unsigned (I_immediate(instr_word_IE))) then
+                  IE_WB <= std_logic_vector(to_unsigned(1, 32));
+                else
+                  IE_WB <= std_logic_vector(to_unsigned(0, 32));
+                end if;
+              end if;
+  
+              if decoded_instruction_IE(LUI_bit_position) = '1' then
+                IE_WB <= U_immediate(instr_word_IE);
+              end if;
+  
+              if decoded_instruction_IE(SLT_bit_position) = '1' then
+                if pass_BLT = '1' then
+                  IE_WB <= std_logic_vector(to_unsigned(1, 32));
+                else
+                  IE_WB <= std_logic_vector(to_unsigned(0, 32));
+                end if;
+              end if;
+  
+              if decoded_instruction_IE(SLTU_bit_position) = '1' then
+                if pass_BLTU = '1' then
+                  IE_WB <= std_logic_vector(to_unsigned(1, 32));
+                else
+                  IE_WB <= std_logic_vector(to_unsigned(0, 32));
+                end if;
+              end if;
+  
+              -----------------------------------------------------------
+  
+              --------------------- CSR OPS ---------------------------
+              if decoded_instruction_IE(CSRRC_bit_position)  = '1' or 
+                 decoded_instruction_IE(CSRRS_bit_position)  = '1' or 
+                 decoded_instruction_IE(CSRRW_bit_position)  = '1' or
+                 decoded_instruction_IE(CSRRSI_bit_position) = '1' or 
+                 decoded_instruction_IE(CSRRCI_bit_position) = '1' or 
+                 decoded_instruction_IE(CSRRWI_bit_position) = '1' then
+                if zero_rd = '0' then
+                  WB_EN_next_IE <= '1';
+                end if;
+              end if;
+  
+              -------------------------------------------------------
+  
+              if decoded_instruction_IE(ECALL_bit_position) = '1' then
+                if DEBUG_MODE(harc_EXEC) = '0' then
+                  ie_except_data <= ECALL_EXCEPT_CODE;
+                end if;
+              end if;
+  
+              if decoded_instruction_IE(DRET_bit_position) = '1' then
+                if DEBUG_MODE(harc_EXEC) = '0' then
+                  ie_except_data <= ILLEGAL_INSN_EXCEPT_CODE;
+                end if;
+              end if;
+  
+              if decoded_instruction_IE(ILL_bit_position) = '1' then
+                ie_except_data <= ILLEGAL_INSN_EXCEPT_CODE;
+              end if;
+  
+              if RV32M = 1 then
+                if decoded_instruction_IE(MUL_bit_position) = '1' then
+                  MUL_WB <= MUL_low;
+                end if;
+  
+                if decoded_instruction_IE(MULH_bit_position)   = '1' or 
+                   decoded_instruction_IE(MULHU_bit_position)  = '1' or
+                   decoded_instruction_IE(MULHSU_bit_position) = '1' then
+                  case state_mulh is
+                    when mult =>
+                      WB_EN_next_IE <= '1';
+                    when others =>
+                      null;
+                  end case;
+                  if core_busy_IE_int = '0' then
+                    IE_WB  <= MUL(63 downto 32);
+                  end if;
+                end if;
+  
+                if decoded_instruction_IE(DIVU_bit_position) = '1' or
+                   decoded_instruction_IE(DIV_bit_position)  = '1' or
+                   decoded_instruction_IE(REMU_bit_position) = '1' or
+                   decoded_instruction_IE(REM_bit_position)  = '1' then
+                  if div_count_wire(5) = '1' or div_bypass_en = '1' then
+                    WB_EN_next_IE <= '1';
+                  end if;
+                end if;
+  
+                if decoded_instruction_IE(DIVU_bit_position) = '1' then
+                  if zero_rs2 = '1' then
+                    IE_WB  <= (others => '1');
+                  elsif zero_rs1 = '1' then
+                    IE_WB <= (others => '0');
+                  elsif pass_BEQ = '1' then
+                    IE_WB <= (31 downto 1 => '0') & '1';
+                  elsif pass_BLTU = '1' then
+                    IE_WB <= (others => '0');
+                  else
+                    IE_WB <= res(31 downto 0);
+                  end if;
+                end if;
+  
+                if decoded_instruction_IE(DIV_bit_position) = '1' then
+                  if zero_rs2 = '1' then
+                    IE_WB  <= (others => '1');
+                  elsif zero_rs1 = '1' then
+                    IE_WB <= (others => '0');
+              --    elsif abs(signed(RS1_DATA_IE)) < abs(signed(RS2_DATA_IE)) then
+                --    IE_WB <= (others => '0');
+                  elsif pass_BEQ = '1' then
+                    if RS2_DATA_IE(31) = RS1_DATA_IE(31) then
+                      IE_WB <= (31 downto 1 => '0') & '1';
+                    else
+                      IE_WB <= (31 downto 0 => '1');
+                    end if;
+                  else
+                    if RS1_DATA_IE(31) = RS2_DATA_IE(31) then
+                      IE_WB <= res(31 downto 0);
+                    else
+                      IE_WB <= std_logic_vector(unsigned(not(res(31 downto 0)))+1);
+                    end if;
+                  end if;
+                end if;
+  
+                if decoded_instruction_IE(REMU_bit_position) = '1' then
+                  if zero_rs2 = '1' then
+                    IE_WB <= RS1_Data_IE;
+                  elsif zero_rs1 = '1' then
+                    IE_WB <= (others => '0');
+                  elsif pass_BEQ = '1' then
+                    IE_WB <= (others => '0');
+                  elsif pass_BLTU = '1' then
+                    IE_WB <= RS1_Data_IE;
+                  else
+                    IE_WB <= res(63 downto 32);
+                  end if;
+                end if;
+  
+                if decoded_instruction_IE(REM_bit_position) = '1' then
+                  if zero_rs2 = '1' then
+                    IE_WB <= RS1_Data_IE;
+                  elsif zero_rs1 = '1' then
+                    IE_WB <= (others => '0');
+                  elsif pass_BEQ = '1' then
+                    IE_WB <= (others => '0');
+              --    elsif abs(signed(RS1_DATA_IE)) < abs(signed(RS2_DATA_IE)) then
+                --    IE_WB <= RS1_Data_IE;
+              --    elsif abs(signed(RS1_DATA_IE)) = abs(signed(RS2_DATA_IE)) then
+                --    IE_WB <= (others => '0');
+                  else
+                    if RS1_DATA_IE(31) = '1' then
+                      IE_WB <= std_logic_vector(unsigned(not(res(63 downto 32)))+1);
+                    else
+                      IE_WB <= res(63 downto 32);
+                    end if;
+                  end if;
+                end if;
+              end if;
+  
+            -- EXECUTE OF INSTRUCTION (END) --------------------------
+            end if;  -- instr_rvalid_IE values
+            
+          when csr_instr_wait_state =>
+            if (csr_instr_done = '1' and csr_access_denied_o = '0') then
+              if zero_rd = '0' then
+                IE_WB_EN <= IE_WB_EN_wire_int;
+                IE_WB <= csr_rdata_o;
+              end if;
+            elsif (csr_instr_done = '1' and csr_access_denied_o = '1') then  -- ILLEGAL_INSTRUCTION
+              ie_except_data                       <= ILLEGAL_INSN_EXCEPT_CODE;
             end if;
-          elsif (csr_instr_done = '1' and csr_access_denied_o = '1') then  -- ILLEGAL_INSTRUCTION
-            ie_except_data                       <= ILLEGAL_INSN_EXCEPT_CODE;
-          end if;
-      end case;  -- fsm_IE state cases
-    end if;  -- reset, clk_i
-  end process;
-
+        end case;  -- fsm_IE state cases
+      end if;  -- reset, clk_i
+    end process;
+  end generate debug_ie_sin_en;
+  
   div_bypass_en_gen : if RV32M = 1 generate
     -- AAA Bypass enable is not working, check KDOTP_test SIMD=2 Single accl number of vect elements = 1 
     --div_bypass_en <= '1' when zero_rs2 or zero_rs1 or pass_BEQ or (pass_BLTU and not signed_op) else '0';
-    div_bypass_en <= '0';
+  div_bypass_en <= '0';
   end generate;
 
 
@@ -514,353 +810,740 @@ begin
   --  ██║███████╗    ╚██████╗╚██████╔╝██║ ╚═╝ ██║██████╔╝  --
   --  ╚═╝╚══════╝     ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚═════╝   --
   -----------------------------------------------------------
-
-  fsm_IE_comb : process(
-                          instr_word_IE, pc_IE, Immediate, RS1_Data_IE, RS2_Data_IE, harc_EXEC,
-                          absolute_address_int, WB_EN_next_IE, state_IE_int,
-                          decoded_instruction_IE, WB_EN_next_ID, state_div,
-                          halt_update_IE_pending, instr_gnt_i, MHARTID, MSTATUS, RS1_Data_IE_int,
-                          RS2_Data_IE_int, irq_i, irq_pending, fetch_enable_i, ie_instr_req,
-                          core_busy_IE_lat, instr_rvalid_IE_int, pass_BRANCH, data_addr_internal_IE, 
-                          halt_IE, signed_op, res, sub, csr_instr_done, csr_access_denied_o, div_count,
-                          partial_mulh_a, partial_mulh_b, partial_mulh_c, partial_mulh_d, MUL_int, 
-                          partial_mul_b_wire, partial_mul_c_wire, partial_mul_d_wire, RS1_Data_IE_int_wire
-                       ) --VHDL1993
-    variable absolute_jump_wires              : std_logic_vector(harc_range);
-    variable core_busy_IE_wires               : std_logic;
-    variable IE_except_condition_wires        : std_logic;
-    variable set_branch_condition_wires       : std_logic;
-    variable ie_taken_branch_wires            : std_logic;
-    variable set_mret_condition_wires         : std_logic;
-    variable set_wfi_condition_wires          : std_logic;
-    variable jump_instr_wires                 : std_logic;
-    variable branch_instr_wires               : std_logic;
-    variable ebreak_instr_wires               : std_logic;
-    variable WFI_Instr_wires                  : std_logic;
-    variable served_irq_wires                 : std_logic_vector(harc_range);
-    variable nextstate_IE_wires               : fsm_IE_states;
-
-  begin
-    Immediate                        <= B_immediate(instr_word_IE);
-    PC_offset                        <= std_logic_vector(signed(pc_IE) + signed(Immediate));
-    served_irq_wires                 := (others => '0');
-    served_pending_irq               <= (others => '0');
-    absolute_address_int             <= std_logic_vector(signed(RS1_Data_IE) + signed(I_immediate(instr_word_IE)));
-    absolute_address                 <= absolute_address_int(31 downto 1) & '0'; -- set LSB to '0'
-    nextstate_IE_wires               := normal;
-    harc_to_csr                      <= harc_EXEC;
-    sw_irq_pending                   <= (others => '0');
-    sw_irq_en                        <= (others => '1'); -- always enabled by default
-    sw_irq_int                       <= (others => '0');
-    absolute_jump_wires              := (others => '0');
-    core_busy_IE_wires               := '0';
-    IE_except_condition_wires        := '0';
-    set_branch_condition_wires       := '0';
-    set_wfi_condition_wires          := '0';    
-    ie_taken_branch_wires            := '0';
-    set_mret_condition_wires         := '0';
-    jump_instr_wires                 := '0';
-    branch_instr_wires               := '0';
-    ebreak_instr_wires               := '0';
-    WFI_Instr_wires                  := '0';
-    sleep_state                      <= '0';
-    ie_csr_wdata_i                   <= RS1_Data_IE;
-    csr_instr_req                    <= '0';
-    csr_op_i                         <= (others => '0');
-    csr_addr_i                       <= (others => '0');
-    IE_WB_EN_wire_int                    <= (WB_EN_next_IE or (instr_rvalid_IE_int and WB_EN_next_ID  and not decoded_instruction_IE(MUL_bit_position))) and not served_irq_wires(harc_EXEC);
-    --branch prediction signals
-    if instr_gnt_i = '0' then
-      halt_update_IE_wire              <= halt_update_IE_pending; -- latch the halt wire as long as we don't have a valid instr
-    else
-      halt_update_IE_wire              <= (others => '0'); -- latch the halt wire as long as we don't have a valid instr 
-    end if;
-
-    branch_taken                     <= '0';
-    source_hartid_o                  <= to_integer(unsigned(MHARTID(harc_EXEC)(THREAD_POOL_SIZE_GLOBAL-1 downto 0)));
-
-    if RV32M = 1 then
-      MUL_WB_EN_wire_int                 <= WB_EN_next_ID and decoded_instruction_IE(MUL_bit_position) and not served_irq_wires(harc_EXEC);
-      RS1_Data_IE_int_wire           <= RS1_Data_IE_int;
-      RS2_Data_IE_int_wire           <= RS2_Data_IE_int;
-      partial_mulh_a_wire            <= (others => '0');
-      partial_mulh_b_wire            <= (others => '0');
-      partial_mulh_c_wire            <= (others => '0');
-      partial_mulh_d_wire            <= (others => '0');
-      partial_mul_b_wire             <= (others => '0');
-      partial_mul_c_wire             <= (others => '0');
-      partial_mul_d_wire             <= (others => '0');
-      MUL_int                        <= (others => '0');
-      MUL                            <= (others => '0');
-      MUL_low                        <= (others => '0');
-      div_count_wire                 <= (others => '0');
-      res_wire                       <= (others => '0');
-      sub                            <= (others => '0');
-      nextstate_mul                  <= mult;
-      nextstate_mulh                 <= init;
-      nextstate_div                  <= init;
-    end if;
-
-    case state_IE_int is                  -- stage status
-      when sleep =>
-        if irq_i = '1' or irq_pending(harc_EXEC) = '1' then
-          nextstate_IE_wires             := normal;
-          served_irq_wires(harc_EXEC)    := '1';
-          ie_taken_branch_wires          := '1';
-        elsif fetch_enable_i = '1' then
-          nextstate_IE_wires := normal;
-        else
-          core_busy_IE_wires := '1';
-          nextstate_IE_wires := sleep;
-        end if;
-
-      when normal =>
-
-        if ie_instr_req = '0' and core_busy_IE_lat = '0' then
-        elsif instr_rvalid_IE_int = '0' then
-        elsif irq_pending(harc_EXEC)= '1' then
-          -- manage irq as an absolute branch to MTVEC, also defining mepc value properly in program counter unit
-          -- irq is served only if we are not in a delay slot for the interrupted harc
-          -- for simplicity presently only harc 0 is interrupted (decided in program counter unit)
-          -- the current valid instruction is discarded, only its pc value gets used for mepc
-          served_irq_wires(harc_EXEC)    := '1';
-          ie_taken_branch_wires          := '1';
-          if decoded_instruction_IE(WFI_bit_position) = '1' then -- Inform the CSR unit that the last instruction before we went to the subroutine was a WFI instruction.
-            WFI_Instr_wires := '1';
-          end if;
-        else                         -- process the instruction
-
-        -- EXECUTE OF INSTRUCTION ---------------------
-
-          if decoded_instruction_IE(JAL_bit_position) = '1' then  -- JAL instruction
-            jump_instr_wires               := '1';
-            set_branch_condition_wires := '1';
-            ie_taken_branch_wires      := '1';
-            Immediate                  <= UJ_immediate(instr_word_IE);
-          end if;
-
-          if decoded_instruction_IE(JALR_bit_position) = '1' then  -- JALR instruction
-            set_branch_condition_wires     := '1';
+  debug_ie_asin_nen: if debug_en = 0 generate
+    fsm_IE_comb : process(
+                            instr_word_IE, pc_IE, Immediate, RS1_Data_IE, RS2_Data_IE, harc_EXEC,
+                            absolute_address_int, WB_EN_next_IE, state_IE_int,
+                            decoded_instruction_IE, WB_EN_next_ID, state_div,
+                            halt_update_IE_pending, instr_gnt_i, MHARTID, MSTATUS, RS1_Data_IE_int,
+                            RS2_Data_IE_int, irq_i, irq_pending, fetch_enable_i, ie_instr_req,
+                            core_busy_IE_lat, instr_rvalid_IE_int, pass_BRANCH, data_addr_internal_IE, 
+                            halt_IE, signed_op, res, sub, csr_instr_done, csr_access_denied_o, div_count,
+                            partial_mulh_a, partial_mulh_b, partial_mulh_c, partial_mulh_d, MUL_int, 
+                            partial_mul_b_wire, partial_mul_c_wire, partial_mul_d_wire, RS1_Data_IE_int_wire
+                         ) --VHDL1993
+      variable absolute_jump_wires              : std_logic_vector(harc_range);
+      variable core_busy_IE_wires               : std_logic;
+      variable IE_except_condition_wires        : std_logic;
+      variable set_branch_condition_wires       : std_logic;
+      variable ie_taken_branch_wires            : std_logic;
+      variable set_mret_condition_wires         : std_logic;
+      variable set_wfi_condition_wires          : std_logic;
+      variable jump_instr_wires                 : std_logic;
+      variable branch_instr_wires               : std_logic;
+      variable ebreak_instr_wires               : std_logic;
+      variable WFI_Instr_wires                  : std_logic;
+      variable served_irq_wires                 : std_logic_vector(harc_range);
+      variable nextstate_IE_wires               : fsm_IE_states;
+  
+    begin
+      Immediate                        <= B_immediate(instr_word_IE);
+      PC_offset                        <= std_logic_vector(signed(pc_IE) + signed(Immediate));
+      served_irq_wires                 := (others => '0');
+      served_pending_irq               <= (others => '0');
+      absolute_address_int             <= std_logic_vector(signed(RS1_Data_IE) + signed(I_immediate(instr_word_IE)));
+      absolute_address                 <= absolute_address_int(31 downto 1) & '0'; -- set LSB to '0'
+      nextstate_IE_wires               := normal;
+      harc_to_csr                      <= harc_EXEC;
+      sw_irq_pending                   <= (others => '0');
+      sw_irq_en                        <= (others => '1'); -- always enabled by default
+      sw_irq_int                       <= (others => '0');
+      absolute_jump_wires              := (others => '0');
+      core_busy_IE_wires               := '0';
+      IE_except_condition_wires        := '0';
+      set_branch_condition_wires       := '0';
+      set_wfi_condition_wires          := '0';    
+      ie_taken_branch_wires            := '0';
+      set_mret_condition_wires         := '0';
+      jump_instr_wires                 := '0';
+      branch_instr_wires               := '0';
+      ebreak_instr_wires               := '0';
+      WFI_Instr_wires                  := '0';
+      sleep_state                      <= '0';
+      ie_csr_wdata_i                   <= RS1_Data_IE;
+      csr_instr_req                    <= '0';
+      csr_op_i                         <= (others => '0');
+      csr_addr_i                       <= (others => '0');
+      IE_WB_EN_wire_int                    <= (WB_EN_next_IE or (instr_rvalid_IE_int and WB_EN_next_ID  and not decoded_instruction_IE(MUL_bit_position))) and not served_irq_wires(harc_EXEC);
+      --branch prediction signals
+      if instr_gnt_i = '0' then
+        halt_update_IE_wire              <= halt_update_IE_pending; -- latch the halt wire as long as we don't have a valid instr
+      else
+        halt_update_IE_wire              <= (others => '0'); -- latch the halt wire as long as we don't have a valid instr 
+      end if;
+  
+      branch_taken                     <= '0';
+      source_hartid_o                  <= to_integer(unsigned(MHARTID(harc_EXEC)(THREAD_POOL_SIZE_GLOBAL-1 downto 0)));
+  
+      if RV32M = 1 then
+        MUL_WB_EN_wire_int                 <= WB_EN_next_ID and decoded_instruction_IE(MUL_bit_position) and not served_irq_wires(harc_EXEC);
+        RS1_Data_IE_int_wire           <= RS1_Data_IE_int;
+        RS2_Data_IE_int_wire           <= RS2_Data_IE_int;
+        partial_mulh_a_wire            <= (others => '0');
+        partial_mulh_b_wire            <= (others => '0');
+        partial_mulh_c_wire            <= (others => '0');
+        partial_mulh_d_wire            <= (others => '0');
+        partial_mul_b_wire             <= (others => '0');
+        partial_mul_c_wire             <= (others => '0');
+        partial_mul_d_wire             <= (others => '0');
+        MUL_int                        <= (others => '0');
+        MUL                            <= (others => '0');
+        MUL_low                        <= (others => '0');
+        div_count_wire                 <= (others => '0');
+        res_wire                       <= (others => '0');
+        sub                            <= (others => '0');
+        nextstate_mul                  <= mult;
+        nextstate_mulh                 <= init;
+        nextstate_div                  <= init;
+      end if;
+  
+      case state_IE_int is                  -- stage status
+        when sleep =>
+          if irq_i = '1' or irq_pending(harc_EXEC) = '1' then
+            nextstate_IE_wires             := normal;
+            served_irq_wires(harc_EXEC)    := '1';
             ie_taken_branch_wires          := '1';
-            jump_instr_wires               := '1';
-            absolute_jump_wires(harc_EXEC) := '1';
+          elsif fetch_enable_i = '1' then
+            nextstate_IE_wires := normal;
+          else
+            core_busy_IE_wires := '1';
+            nextstate_IE_wires := sleep;
           end if;
-
-          if decoded_instruction_IE(BEQ_bit_position)  = '1' or
-             decoded_instruction_IE(BNE_bit_position)  = '1' or
-             decoded_instruction_IE(BLT_bit_position)  = '1' or
-             decoded_instruction_IE(BLTU_bit_position) = '1' or
-             decoded_instruction_IE(BGE_bit_position)  = '1' or
-             decoded_instruction_IE(BGEU_bit_position) = '1' then
-            branch_instr_wires := '1';
-            if pass_BRANCH = '1' then
-              branch_taken <= '1';
-            else
-              Immediate <= (std_logic_vector(to_unsigned(4, 32)));
+  
+        when normal =>
+  
+          if ie_instr_req = '0' and core_busy_IE_lat = '0' then
+          elsif instr_rvalid_IE_int = '0' then
+          elsif irq_pending(harc_EXEC)= '1' then
+            -- manage irq as an absolute branch to MTVEC, also defining mepc value properly in program counter unit
+            -- irq is served only if we are not in a delay slot for the interrupted harc
+            -- for simplicity presently only harc 0 is interrupted (decided in program counter unit)
+            -- the current valid instruction is discarded, only its pc value gets used for mepc
+            served_irq_wires(harc_EXEC)    := '1';
+            ie_taken_branch_wires          := '1';
+            if decoded_instruction_IE(WFI_bit_position) = '1' then -- Inform the CSR unit that the last instruction before we went to the subroutine was a WFI instruction.
+              WFI_Instr_wires := '1';
             end if;
-            if pass_BRANCH = '1' then
+          else                         -- process the instruction
+  
+          -- EXECUTE OF INSTRUCTION ---------------------
+  
+            if decoded_instruction_IE(JAL_bit_position) = '1' then  -- JAL instruction
+              jump_instr_wires               := '1';
               set_branch_condition_wires := '1';
               ie_taken_branch_wires      := '1';
+              Immediate                  <= UJ_immediate(instr_word_IE);
             end if;
-          end if;
-
-          if decoded_instruction_IE(SW_MIP_bit_position) = '1' then
-            --if data_addr_internal_IE(31 downto 8) = x"0000FF" and halt_IE = '0' then
-            --  core_busy_IE_wires := '1';
-            --  nextstate_IE_wires := csr_instr_wait_state;
-            --end if;
-            --csr_instr_req  <= '1';
-            --ie_csr_wdata_i <= RS2_Data_IE;
-            --csr_addr_i     <= MIP_ADDR;
-            --source_hartid_o <= harc_EXEC;
-            --csr_op_i <= CSRRW; 0x0000FF00
-            if data_addr_internal_IE(31 downto 9) = x"0000F" & "111" then
-              if halt_IE = '0' then
-                if data_addr_internal_IE(8) = '1' then -- send single sw interrupt
-                  for i in 0 to THREAD_POOL_SIZE_GLOBAL-1 loop
-                    if data_addr_internal_IE(7 downto 0) = std_logic_vector(to_unsigned((4*i),8)) then
-                      --harc_to_csr <= i;
-                      sw_irq_int(i) <= '1'; -- send a single interrupt
-                    end if;
-                  end loop;
+  
+            if decoded_instruction_IE(JALR_bit_position) = '1' then  -- JALR instruction
+              set_branch_condition_wires     := '1';
+              ie_taken_branch_wires          := '1';
+              jump_instr_wires               := '1';
+              absolute_jump_wires(harc_EXEC) := '1';
+            end if;
+  
+            if decoded_instruction_IE(BEQ_bit_position)  = '1' or
+               decoded_instruction_IE(BNE_bit_position)  = '1' or
+               decoded_instruction_IE(BLT_bit_position)  = '1' or
+               decoded_instruction_IE(BLTU_bit_position) = '1' or
+               decoded_instruction_IE(BGE_bit_position)  = '1' or
+               decoded_instruction_IE(BGEU_bit_position) = '1' then
+              branch_instr_wires := '1';
+              if pass_BRANCH = '1' then
+                branch_taken <= '1';
+              else
+                Immediate <= (std_logic_vector(to_unsigned(4, 32)));
+              end if;
+              if pass_BRANCH = '1' then
+                set_branch_condition_wires := '1';
+                ie_taken_branch_wires      := '1';
+              end if;
+            end if;
+  
+            if decoded_instruction_IE(SW_MIP_bit_position) = '1' then
+              --if data_addr_internal_IE(31 downto 8) = x"0000FF" and halt_IE = '0' then
+              --  core_busy_IE_wires := '1';
+              --  nextstate_IE_wires := csr_instr_wait_state;
+              --end if;
+              --csr_instr_req  <= '1';
+              --ie_csr_wdata_i <= RS2_Data_IE;
+              --csr_addr_i     <= MIP_ADDR;
+              --source_hartid_o <= harc_EXEC;
+              --csr_op_i <= CSRRW; 0x0000FF00
+              if data_addr_internal_IE(31 downto 9) = x"0000F" & "111" then
+                if halt_IE = '0' then
+                  if data_addr_internal_IE(8) = '1' then -- send single sw interrupt
+                    for i in 0 to THREAD_POOL_SIZE_GLOBAL-1 loop
+                      if data_addr_internal_IE(7 downto 0) = std_logic_vector(to_unsigned((4*i),8)) then
+                        --harc_to_csr <= i;
+                        sw_irq_int(i) <= '1'; -- send a single interrupt
+                      end if;
+                    end loop;
+                  end if;
                 end if;
               end if;
             end if;
-          end if;
-
-          if decoded_instruction_IE(CSRRW_bit_position) = '1' or decoded_instruction_IE(CSRRWI_bit_position) = '1' or
-             decoded_instruction_IE(CSRRC_bit_position) = '1' or decoded_instruction_IE(CSRRCI_bit_position) = '1' or
-             decoded_instruction_IE(CSRRS_bit_position) = '1' or decoded_instruction_IE(CSRRSI_bit_position) = '1' then
-            if halt_IE = '0' then
-              core_busy_IE_wires := '1';
-              nextstate_IE_wires := csr_instr_wait_state;
-              csr_instr_req      <= '1';
-              csr_op_i           <= FUNCT3(instr_word_IE);
-              csr_addr_i         <= std_logic_vector(to_unsigned(to_integer(unsigned(CSR_ADDR(instr_word_IE))), 12));
+  
+            if decoded_instruction_IE(CSRRW_bit_position) = '1' or decoded_instruction_IE(CSRRWI_bit_position) = '1' or
+               decoded_instruction_IE(CSRRC_bit_position) = '1' or decoded_instruction_IE(CSRRCI_bit_position) = '1' or
+               decoded_instruction_IE(CSRRS_bit_position) = '1' or decoded_instruction_IE(CSRRSI_bit_position) = '1' then
+              if halt_IE = '0' then
+                core_busy_IE_wires := '1';
+                nextstate_IE_wires := csr_instr_wait_state;
+                csr_instr_req      <= '1';
+                csr_op_i           <= FUNCT3(instr_word_IE);
+                csr_addr_i         <= std_logic_vector(to_unsigned(to_integer(unsigned(CSR_ADDR(instr_word_IE))), 12));
+              end if;
             end if;
-          end if;
-
-          if decoded_instruction_IE(CSRRWI_bit_position) = '1' or
-             decoded_instruction_IE(CSRRCI_bit_position) = '1' or
-             decoded_instruction_IE(CSRRSI_bit_position) = '1' then
-            ie_csr_wdata_i <= std_logic_vector(resize(to_unsigned(rs1(instr_word_IE), 5), 32));
-          end if;
-
-          if decoded_instruction_IE(ECALL_bit_position) = '1' then
-            IE_except_condition_wires      := '1';
-            ie_taken_branch_wires          := '1';
-          end if;
-
-          if decoded_instruction_IE(EBREAK_bit_position) = '1' then
-            ebreak_instr_wires := '1';
-          end if;
-
-          if decoded_instruction_IE(MRET_bit_position) = '1' then
-            set_mret_condition_wires       := '1';
-            ie_taken_branch_wires          := '1';
-            if fetch_enable_i = '0' then
-              nextstate_IE_wires      := sleep;
-              core_busy_IE_wires      := '1';
+  
+            if decoded_instruction_IE(CSRRWI_bit_position) = '1' or
+               decoded_instruction_IE(CSRRCI_bit_position) = '1' or
+               decoded_instruction_IE(CSRRSI_bit_position) = '1' then
+              ie_csr_wdata_i <= std_logic_vector(resize(to_unsigned(rs1(instr_word_IE), 5), 32));
             end if;
-          end if;
-
-          if decoded_instruction_IE(WFI_bit_position) = '1' then
-            Immediate <= (others => '0');
-            if MSTATUS(harc_EXEC)(0) = '1' then
-              set_wfi_condition_wires  := '1';
-              ie_taken_branch_wires    := '1';
+  
+            if decoded_instruction_IE(ECALL_bit_position) = '1' then
+              IE_except_condition_wires      := '1';
+              ie_taken_branch_wires          := '1';
             end if;
-          end if;
-
-          if decoded_instruction_IE(ILL_bit_position) = '1' then  -- ILLEGAL_INSTRUCTION
-            IE_except_condition_wires := '1';
-            ie_taken_branch_wires     := '1';
-          end if;
-
-          if RV32M = 1 then
-
-            if decoded_instruction_IE(MULH_bit_position)   = '1' or
-               decoded_instruction_IE(MULHU_bit_position)  = '1' or
-               decoded_instruction_IE(MULHSU_bit_position) = '1' then
-              case state_mulh is
-                when init =>
-                  if RS1_Data_IE(31) = '1' and signed_op = '1' then
-                    RS1_Data_IE_int_wire <= std_logic_vector(signed(not(RS1_Data_IE))+1);
-                  else
-                    RS1_Data_IE_int_wire <= RS1_Data_IE;
-                  end if;
-                  if RS2_Data_IE(31) = '1' and signed_op = '1' and decoded_instruction_IE(MULHSU_bit_position) = '0' then
-                    RS2_Data_IE_int_wire <= std_logic_vector(signed(not(RS2_Data_IE))+1);
-                  else
-                    RS2_Data_IE_int_wire <= RS2_Data_IE;
-                  end if;
-                  nextstate_mulh <= mult;
-                  core_busy_IE_wires := '1';
-                when mult =>
-                    partial_mulh_a_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(31 downto 16)) 
-                                                      * unsigned(RS2_Data_IE_int(31 downto 16)));
-                    partial_mulh_b_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(15 downto 0))   
-                                                      * unsigned(RS2_Data_IE_int(31 downto 16)));
-                    partial_mulh_c_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(31 downto 16)) 
-                                                      * unsigned(RS2_Data_IE_int(15 downto 0)));
-                    partial_mulh_d_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(15 downto 0))   
-                                                      * unsigned(RS2_Data_IE_int(15 downto 0)));
-                  nextstate_mulh <= accum;
-                  core_busy_IE_wires := '1';
-                when accum =>
-                  MUL_int <= std_logic_vector((        unsigned(partial_mulh_a) & unsigned(partial_mulh_d)) +
-                                            (x"0000" & unsigned(partial_mulh_b) & x"0000")                  +
-                                            (x"0000" & unsigned(partial_mulh_c) & x"0000"));
-                  if (RS1_Data_IE(31) /= RS2_Data_IE(31) and decoded_instruction_IE(MULH_bit_position) = '1') or
-                                        (RS1_Data_IE(31) = '1' and decoded_instruction_IE(MULHSU_bit_position) = '1') then
-                    MUL <= std_logic_vector(signed(not(MUL_int))+1);
-                  else
-                    MUL <= MUL_int;
-                  end if;
-              end case;
+  
+            if decoded_instruction_IE(EBREAK_bit_position) = '1' then
+              ebreak_instr_wires := '1';
             end if;
-
-            if decoded_instruction_IE(MUL_bit_position) = '1' then
-              partial_mul_b_wire <= std_logic_vector( unsigned(RS1_Data_IE(15 downto 0))   
-                                                * unsigned(RS2_Data_IE(31 downto 16)));
-              partial_mul_c_wire <= std_logic_vector( unsigned(RS1_Data_IE(31 downto 16)) 
-                                                * unsigned(RS2_Data_IE(15 downto 0)));
-              partial_mul_d_wire <= std_logic_vector( unsigned(RS1_Data_IE(15 downto 0))   
-                                                * unsigned(RS2_Data_IE(15 downto 0)));
-              MUL_low <= std_logic_vector((unsigned(partial_mul_d_wire(31 downto 16)) +
-                                           unsigned(partial_mul_b_wire(15 downto 0))  +
-                                           unsigned(partial_mul_c_wire(15 downto 0))) &
-                                           unsigned(partial_mul_d_wire(15 downto 0)));
+  
+            if decoded_instruction_IE(MRET_bit_position) = '1' then
+              set_mret_condition_wires       := '1';
+              ie_taken_branch_wires          := '1';
+              if fetch_enable_i = '0' then
+                nextstate_IE_wires      := sleep;
+                core_busy_IE_wires      := '1';
+              end if;
             end if;
-
-            if decoded_instruction_IE(DIV_bit_position)  = '1' or 
-               decoded_instruction_IE(REM_bit_position)  = '1' or
-               decoded_instruction_IE(DIVU_bit_position) = '1' or 
-               decoded_instruction_IE(REMU_bit_position) = '1' then
-              case state_div is
-                when init =>
-                  if RS1_Data_IE(31) = '0' or signed_op = '0' then
-                    res_wire <= (31 downto 0 => '0') & RS1_Data_IE;
-                  else
-                    RS1_Data_IE_int_wire <= std_logic_vector(signed(not(RS1_Data_IE)) + 1);
-                    res_wire <= (31 downto 0 => '0') & RS1_Data_IE_int_wire;
-                  end if;
-                  if RS2_Data_IE(31) = '0' or signed_op = '0' then
-                    RS2_Data_IE_int_wire <= RS2_Data_IE;
-                  else
-                    RS2_Data_IE_int_wire <= std_logic_vector(signed(not(RS2_Data_IE)) + 1);
-                  end if;
-                  nextstate_div <= divide;
-                  core_busy_IE_wires := '1';
-                when divide =>
-                  if div_count(5) /= '1' then
-                    div_count_wire <= div_count + 1;
+  
+            if decoded_instruction_IE(WFI_bit_position) = '1' then
+              Immediate <= (others => '0');
+              if MSTATUS(harc_EXEC)(0) = '1' then
+                set_wfi_condition_wires  := '1';
+                ie_taken_branch_wires    := '1';
+              end if;
+            end if;
+  
+            if decoded_instruction_IE(ILL_bit_position) = '1' then  -- ILLEGAL_INSTRUCTION
+              IE_except_condition_wires := '1';
+              ie_taken_branch_wires     := '1';
+            end if;
+  
+            if RV32M = 1 then
+  
+              if decoded_instruction_IE(MULH_bit_position)   = '1' or
+                 decoded_instruction_IE(MULHU_bit_position)  = '1' or
+                 decoded_instruction_IE(MULHSU_bit_position) = '1' then
+                case state_mulh is
+                  when init =>
+                    if RS1_Data_IE(31) = '1' and signed_op = '1' then
+                      RS1_Data_IE_int_wire <= std_logic_vector(signed(not(RS1_Data_IE))+1);
+                    else
+                      RS1_Data_IE_int_wire <= RS1_Data_IE;
+                    end if;
+                    if RS2_Data_IE(31) = '1' and signed_op = '1' and decoded_instruction_IE(MULHSU_bit_position) = '0' then
+                      RS2_Data_IE_int_wire <= std_logic_vector(signed(not(RS2_Data_IE))+1);
+                    else
+                      RS2_Data_IE_int_wire <= RS2_Data_IE;
+                    end if;
+                    nextstate_mulh <= mult;
+                    core_busy_IE_wires := '1';
+                  when mult =>
+                      partial_mulh_a_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(31 downto 16)) 
+                                                        * unsigned(RS2_Data_IE_int(31 downto 16)));
+                      partial_mulh_b_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(15 downto 0))   
+                                                        * unsigned(RS2_Data_IE_int(31 downto 16)));
+                      partial_mulh_c_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(31 downto 16)) 
+                                                        * unsigned(RS2_Data_IE_int(15 downto 0)));
+                      partial_mulh_d_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(15 downto 0))   
+                                                        * unsigned(RS2_Data_IE_int(15 downto 0)));
+                    nextstate_mulh <= accum;
+                    core_busy_IE_wires := '1';
+                  when accum =>
+                    MUL_int <= std_logic_vector((        unsigned(partial_mulh_a) & unsigned(partial_mulh_d)) +
+                                              (x"0000" & unsigned(partial_mulh_b) & x"0000")                  +
+                                              (x"0000" & unsigned(partial_mulh_c) & x"0000"));
+                    if (RS1_Data_IE(31) /= RS2_Data_IE(31) and decoded_instruction_IE(MULH_bit_position) = '1') or
+                                          (RS1_Data_IE(31) = '1' and decoded_instruction_IE(MULHSU_bit_position) = '1') then
+                      MUL <= std_logic_vector(signed(not(MUL_int))+1);
+                    else
+                      MUL <= MUL_int;
+                    end if;
+                end case;
+              end if;
+  
+              if decoded_instruction_IE(MUL_bit_position) = '1' then
+                partial_mul_b_wire <= std_logic_vector( unsigned(RS1_Data_IE(15 downto 0))   
+                                                  * unsigned(RS2_Data_IE(31 downto 16)));
+                partial_mul_c_wire <= std_logic_vector( unsigned(RS1_Data_IE(31 downto 16)) 
+                                                  * unsigned(RS2_Data_IE(15 downto 0)));
+                partial_mul_d_wire <= std_logic_vector( unsigned(RS1_Data_IE(15 downto 0))   
+                                                  * unsigned(RS2_Data_IE(15 downto 0)));
+                MUL_low <= std_logic_vector((unsigned(partial_mul_d_wire(31 downto 16)) +
+                                             unsigned(partial_mul_b_wire(15 downto 0))  +
+                                             unsigned(partial_mul_c_wire(15 downto 0))) &
+                                             unsigned(partial_mul_d_wire(15 downto 0)));
+              end if;
+  
+              if decoded_instruction_IE(DIV_bit_position)  = '1' or 
+                 decoded_instruction_IE(REM_bit_position)  = '1' or
+                 decoded_instruction_IE(DIVU_bit_position) = '1' or 
+                 decoded_instruction_IE(REMU_bit_position) = '1' then
+                case state_div is
+                  when init =>
+                    if RS1_Data_IE(31) = '0' or signed_op = '0' then
+                      res_wire <= (31 downto 0 => '0') & RS1_Data_IE;
+                    else
+                      RS1_Data_IE_int_wire <= std_logic_vector(signed(not(RS1_Data_IE)) + 1);
+                      res_wire <= (31 downto 0 => '0') & RS1_Data_IE_int_wire;
+                    end if;
+                    if RS2_Data_IE(31) = '0' or signed_op = '0' then
+                      RS2_Data_IE_int_wire <= RS2_Data_IE;
+                    else
+                      RS2_Data_IE_int_wire <= std_logic_vector(signed(not(RS2_Data_IE)) + 1);
+                    end if;
                     nextstate_div <= divide;
                     core_busy_IE_wires := '1';
+                  when divide =>
+                    if div_count(5) /= '1' then
+                      div_count_wire <= div_count + 1;
+                      nextstate_div <= divide;
+                      core_busy_IE_wires := '1';
+                    end if;
+                    if sub(32) = '1' then -- RS2_Data_IE is the divisor
+                      res_wire <= res(62 downto 0) & '0';
+                    else
+                      res_wire <= sub(31 downto 0) & res(30 downto 0) & '1';
+                    end if;
+                    sub <= std_logic_vector(('0' & unsigned(res(62 downto 31))) - ('0' & unsigned(RS2_Data_IE_int)));
+                end case; 
+              end if;
+  
+            end if; -- END RV32M
+  
+          -- EXECUTE OF INSTRUCTION (END)
+          end if;  -- instr_rvalid_IE values 
+  
+        when csr_instr_wait_state =>
+          if csr_instr_done = '0' then
+            nextstate_IE_wires := csr_instr_wait_state;
+            core_busy_IE_wires := '1';
+          elsif (csr_instr_done = '1' and csr_access_denied_o = '1') then  -- ILLEGAL_INSTRUCTION
+            nextstate_IE_wires        := normal;
+            IE_except_condition_wires := '1';
+            ie_taken_branch_wires     := '1';
+          else
+            nextstate_IE_wires := normal;
+          end if;
+  
+  
+      end case;  -- fsm_IE state cases
+  
+      absolute_jump              <= absolute_jump_wires;
+      core_busy_IE_int               <= core_busy_IE_wires;
+      IE_except_condition        <= IE_except_condition_wires;
+      set_branch_condition       <= set_branch_condition_wires;
+      served_irq                 <= served_irq_wires;
+      ie_taken_branch            <= ie_taken_branch_wires;
+      set_mret_condition         <= set_mret_condition_wires;
+      set_wfi_condition          <= set_wfi_condition_wires;
+      jump_instr_int                 <= jump_instr_wires;
+      branch_instr_int               <= branch_instr_wires;
+      ebreak_instr               <= ebreak_instr_wires;
+      nextstate_IE               <= nextstate_IE_wires;
+      WFI_Instr                  <= WFI_Instr_wires;
+    end process;
+  end generate debug_ie_asin_nen;
+
+  debug_ie_asin_en: if debug_en = 1 generate
+    fsm_IE_comb : process(
+                            instr_word_IE, pc_IE, Immediate, RS1_Data_IE, RS2_Data_IE, harc_EXEC,
+                            absolute_address_int, WB_EN_next_IE, state_IE_int,
+                            decoded_instruction_IE, WB_EN_next_ID, state_div,
+                            halt_update_IE_pending, instr_gnt_i, MHARTID, MSTATUS, RS1_Data_IE_int,
+                            RS2_Data_IE_int, irq_i, irq_pending, fetch_enable_i, ie_instr_req,
+                            core_busy_IE_lat, instr_rvalid_IE_int, pass_BRANCH, data_addr_internal_IE, 
+                            halt_IE, signed_op, res, sub, csr_instr_done, csr_access_denied_o, div_count,
+                            partial_mulh_a, partial_mulh_b, partial_mulh_c, partial_mulh_d, MUL_int, 
+                            partial_mul_b_wire, partial_mul_c_wire, partial_mul_d_wire, RS1_Data_IE_int_wire, 
+                            DEBUG_MODE, irq_en_single_step, wfi_exec_int, single_stepping, halt_req, debug_pc_taken_wire
+                         ) --VHDL1993
+      variable absolute_jump_wires              : std_logic_vector(harc_range);
+      variable core_busy_IE_wires               : std_logic;
+      variable IE_except_condition_wires        : std_logic;
+      variable set_branch_condition_wires       : std_logic;
+      variable ie_taken_branch_wires            : std_logic;
+      variable set_mret_condition_wires         : std_logic;
+      variable set_wfi_condition_wires          : std_logic;
+      variable jump_instr_wires                 : std_logic;
+      variable branch_instr_wires               : std_logic;
+      variable ebreak_instr_wires               : std_logic;
+      variable dret_instr_wires                 : std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
+      variable WFI_Instr_wires                  : std_logic;
+      variable served_irq_wires                 : std_logic_vector(harc_range);
+      variable nextstate_IE_wires               : fsm_IE_states;
+  
+    begin
+      Immediate                        <= B_immediate(instr_word_IE);
+      PC_offset                        <= std_logic_vector(signed(pc_IE) + signed(Immediate));
+      served_irq_wires                 := (others => '0');
+      served_pending_irq               <= (others => '0');
+      absolute_address_int             <= std_logic_vector(signed(RS1_Data_IE) + signed(I_immediate(instr_word_IE)));
+      absolute_address                 <= absolute_address_int(31 downto 1) & '0'; -- set LSB to '0'
+      nextstate_IE_wires               := normal;
+      harc_to_csr                      <= harc_EXEC;
+      sw_irq_pending                   <= (others => '0');
+      
+      for h in harc_range loop
+        if (DEBUG_MODE(h) = '0') and (irq_en_single_step(h) = '1') then
+            sw_irq_en(h) <= '1';
+        else
+            sw_irq_en(h) <= '0';
+        end if;
+        wfi_exec_int(h)                <= '0';
+      end loop;
+
+      sw_irq_int                       <= (others => '0');
+      absolute_jump_wires              := (others => '0');
+      core_busy_IE_wires               := '0';
+      IE_except_condition_wires        := '0';
+      set_branch_condition_wires       := '0';
+      set_wfi_condition_wires          := '0';    
+      ie_taken_branch_wires            := '0';
+      set_mret_condition_wires         := '0';
+      jump_instr_wires                 := '0';
+      branch_instr_wires               := '0';
+      ebreak_instr_wires               := '0';
+      dret_instr_wires                 := (others => '0');
+      WFI_Instr_wires                  := '0';
+      sleep_state                      <= '0';
+      ie_csr_wdata_i                   <= RS1_Data_IE;
+      csr_instr_req                    <= '0';
+      csr_op_i                         <= (others => '0');
+      csr_addr_i                       <= (others => '0');
+      IE_WB_EN_wire_int                <= (WB_EN_next_IE or (instr_rvalid_IE_int and WB_EN_next_ID  and not decoded_instruction_IE(MUL_bit_position))) and not served_irq_wires(harc_EXEC);
+      --branch prediction signals
+      if instr_gnt_i = '0' then
+        halt_update_IE_wire              <= halt_update_IE_pending; -- latch the halt wire as long as we don't have a valid instr
+      else
+        halt_update_IE_wire              <= (others => '0'); -- latch the halt wire as long as we don't have a valid instr 
+      end if;
+  
+      branch_taken                     <= '0';
+      source_hartid_o                  <= to_integer(unsigned(MHARTID(harc_EXEC)(THREAD_POOL_SIZE_GLOBAL-1 downto 0)));
+  
+      if RV32M = 1 then
+        MUL_WB_EN_wire_int             <= WB_EN_next_ID and decoded_instruction_IE(MUL_bit_position) and not served_irq_wires(harc_EXEC);
+        RS1_Data_IE_int_wire           <= RS1_Data_IE_int;
+        RS2_Data_IE_int_wire           <= RS2_Data_IE_int;
+        partial_mulh_a_wire            <= (others => '0');
+        partial_mulh_b_wire            <= (others => '0');
+        partial_mulh_c_wire            <= (others => '0');
+        partial_mulh_d_wire            <= (others => '0');
+        partial_mul_b_wire             <= (others => '0');
+        partial_mul_c_wire             <= (others => '0');
+        partial_mul_d_wire             <= (others => '0');
+        MUL_int                        <= (others => '0');
+        MUL                            <= (others => '0');
+        MUL_low                        <= (others => '0');
+        div_count_wire                 <= (others => '0');
+        res_wire                       <= (others => '0');
+        sub                            <= (others => '0');
+        nextstate_mul                  <= mult;
+        nextstate_mulh                 <= init;
+        nextstate_div                  <= init;
+      end if;
+  
+      case state_IE_int is                  -- stage status
+        when sleep =>
+          if (irq_i = '1' or irq_pending(harc_EXEC) = '1') and DEBUG_MODE(harc_EXEC) = '0'  and irq_en_single_step(harc_EXEC) = '1' then
+            nextstate_IE_wires             := normal;
+            served_irq_wires(harc_EXEC)    := '1';
+            ie_taken_branch_wires          := '1';
+          elsif fetch_enable_i = '1' then
+            nextstate_IE_wires := normal;
+          elsif halt_req(harc_EXEC) = '1' then 
+            nextstate_IE_wires := normal;
+          else
+            core_busy_IE_wires := '1';
+            nextstate_IE_wires := sleep;
+          end if;
+  
+        when normal =>
+  
+          if ie_instr_req = '0' and core_busy_IE_lat = '0' then
+          elsif instr_rvalid_IE_int = '0' or (halt_req(harc_EXEC) = '1' and single_stepping(harc_EXEC) = '0') then
+            if decoded_instruction_IE(WFI_bit_position) = '1' then
+              wfi_exec_int(harc_EXEC) <= '1';
+            end if;
+          elsif irq_pending(harc_EXEC)= '1' and DEBUG_MODE(harc_EXEC) = '0' and irq_en_single_step(harc_EXEC) = '1' then
+            -- manage irq as an absolute branch to MTVEC, also defining mepc value properly in program counter unit
+            -- irq is served only if we are not in a delay slot for the interrupted harc
+            -- for simplicity presently only harc 0 is interrupted (decided in program counter unit)
+            -- the current valid instruction is discarded, only its pc value gets used for mepc
+            served_irq_wires(harc_EXEC)    := '1';
+            ie_taken_branch_wires          := '1';
+            if decoded_instruction_IE(WFI_bit_position) = '1' and single_stepping(harc_EXEC) = '0' then -- Inform the CSR unit that the last instruction before we went to the subroutine was a WFI instruction.
+              WFI_Instr_wires := '1';
+            end if;
+          else                         -- process the instruction
+  
+          -- EXECUTE OF INSTRUCTION ---------------------
+  
+            if decoded_instruction_IE(JAL_bit_position) = '1' then  -- JAL instruction
+              jump_instr_wires               := '1';
+              set_branch_condition_wires := '1';
+              ie_taken_branch_wires      := '1';
+              Immediate                  <= UJ_immediate(instr_word_IE);
+            end if;
+  
+            if decoded_instruction_IE(JALR_bit_position) = '1' then  -- JALR instruction
+              set_branch_condition_wires     := '1';
+              ie_taken_branch_wires          := '1';
+              jump_instr_wires               := '1';
+              absolute_jump_wires(harc_EXEC) := '1';
+            end if;
+  
+            if decoded_instruction_IE(BEQ_bit_position)  = '1' or
+               decoded_instruction_IE(BNE_bit_position)  = '1' or
+               decoded_instruction_IE(BLT_bit_position)  = '1' or
+               decoded_instruction_IE(BLTU_bit_position) = '1' or
+               decoded_instruction_IE(BGE_bit_position)  = '1' or
+               decoded_instruction_IE(BGEU_bit_position) = '1' then
+              branch_instr_wires := '1';
+              if pass_BRANCH = '1' then
+                branch_taken <= '1';
+              else
+                Immediate <= (std_logic_vector(to_unsigned(4, 32)));
+              end if;
+              if pass_BRANCH = '1' then
+                set_branch_condition_wires := '1';
+                ie_taken_branch_wires      := '1';
+              end if;
+            end if;
+  
+            if decoded_instruction_IE(SW_MIP_bit_position) = '1' then
+              --if data_addr_internal_IE(31 downto 8) = x"0000FF" and halt_IE = '0' then
+              --  core_busy_IE_wires := '1';
+              --  nextstate_IE_wires := csr_instr_wait_state;
+              --end if;
+              --csr_instr_req  <= '1';
+              --ie_csr_wdata_i <= RS2_Data_IE;
+              --csr_addr_i     <= MIP_ADDR;
+              --source_hartid_o <= harc_EXEC;
+              --csr_op_i <= CSRRW; 0x0000FF00
+              if data_addr_internal_IE(31 downto 9) = x"0000F" & "111" then
+                if halt_IE = '0' then
+                  if data_addr_internal_IE(8) = '1' then -- send single sw interrupt
+                    for i in 0 to THREAD_POOL_SIZE_GLOBAL-1 loop
+                      if data_addr_internal_IE(7 downto 0) = std_logic_vector(to_unsigned((4*i),8)) then
+                        --harc_to_csr <= i;
+                        sw_irq_int(i) <= '1'; -- send a single interrupt
+                      end if;
+                    end loop;
                   end if;
-                  if sub(32) = '1' then -- RS2_Data_IE is the divisor
-                    res_wire <= res(62 downto 0) & '0';
-                  else
-                    res_wire <= sub(31 downto 0) & res(30 downto 0) & '1';
-                  end if;
-                  sub <= std_logic_vector(('0' & unsigned(res(62 downto 31))) - ('0' & unsigned(RS2_Data_IE_int)));
-              end case; 
+                end if;
+              end if;
+            end if;
+  
+            if decoded_instruction_IE(CSRRW_bit_position) = '1' or decoded_instruction_IE(CSRRWI_bit_position) = '1' or
+               decoded_instruction_IE(CSRRC_bit_position) = '1' or decoded_instruction_IE(CSRRCI_bit_position) = '1' or
+               decoded_instruction_IE(CSRRS_bit_position) = '1' or decoded_instruction_IE(CSRRSI_bit_position) = '1' then
+              if halt_IE = '0' then
+                core_busy_IE_wires := '1';
+                nextstate_IE_wires := csr_instr_wait_state;
+                csr_instr_req      <= '1';
+                csr_op_i           <= FUNCT3(instr_word_IE);
+                csr_addr_i         <= std_logic_vector(to_unsigned(to_integer(unsigned(CSR_ADDR(instr_word_IE))), 12));
+              end if;
+            end if;
+  
+            if decoded_instruction_IE(CSRRWI_bit_position) = '1' or
+               decoded_instruction_IE(CSRRCI_bit_position) = '1' or
+               decoded_instruction_IE(CSRRSI_bit_position) = '1' then
+              ie_csr_wdata_i <= std_logic_vector(resize(to_unsigned(rs1(instr_word_IE), 5), 32));
+            end if;
+  
+            if decoded_instruction_IE(ECALL_bit_position) = '1' then
+              if DEBUG_MODE(harc_EXEC) = '0' then
+                IE_except_condition_wires      := '1';
+                ie_taken_branch_wires          := '1';
+              end if;
+            end if;
+  
+            if decoded_instruction_IE(EBREAK_bit_position) = '1' then
+              ebreak_instr_wires := '1';
             end if;
 
-          end if; -- END RV32M
-
-        -- EXECUTE OF INSTRUCTION (END)
-        end if;  -- instr_rvalid_IE values 
-
-      when csr_instr_wait_state =>
-        if csr_instr_done = '0' then
-          nextstate_IE_wires := csr_instr_wait_state;
-          core_busy_IE_wires := '1';
-        elsif (csr_instr_done = '1' and csr_access_denied_o = '1') then  -- ILLEGAL_INSTRUCTION
-          nextstate_IE_wires        := normal;
-          IE_except_condition_wires := '1';
-          ie_taken_branch_wires     := '1';
-        else
-          nextstate_IE_wires := normal;
-        end if;
-
-
-    end case;  -- fsm_IE state cases
-
-    absolute_jump              <= absolute_jump_wires;
-    core_busy_IE_int               <= core_busy_IE_wires;
-    IE_except_condition        <= IE_except_condition_wires;
-    set_branch_condition       <= set_branch_condition_wires;
-    served_irq                 <= served_irq_wires;
-    ie_taken_branch            <= ie_taken_branch_wires;
-    set_mret_condition         <= set_mret_condition_wires;
-    set_wfi_condition          <= set_wfi_condition_wires;
-    jump_instr_int                 <= jump_instr_wires;
-    branch_instr_int               <= branch_instr_wires;
-    ebreak_instr               <= ebreak_instr_wires;
-    nextstate_IE               <= nextstate_IE_wires;
-    WFI_Instr                  <= WFI_Instr_wires;
-  end process;
+            if decoded_instruction_IE(DRET_bit_position) = '1' then
+              if DEBUG_MODE(harc_EXEC) = '1' then
+                dret_instr_wires(harc_EXEC) := '1';
+              else 
+                IE_except_condition_wires := '1';
+                ie_taken_branch_wires     := '1';
+              end if;
+            end if;
+  
+            if decoded_instruction_IE(MRET_bit_position) = '1' then
+              set_mret_condition_wires       := '1';
+              ie_taken_branch_wires          := '1';
+              if fetch_enable_i = '0' then
+                nextstate_IE_wires      := sleep;
+                core_busy_IE_wires      := '1';
+              end if;
+            end if;
+  
+            if decoded_instruction_IE(WFI_bit_position) = '1' then
+              if DEBUG_MODE(harc_EXEC) = '0' and single_stepping(harc_EXEC) = '0' then
+                wfi_exec_int(harc_EXEC) <= '1';
+                Immediate               <= (others => '0');
+                if MSTATUS(harc_EXEC)(0) = '1' then
+                  set_wfi_condition_wires  := '1';
+                  ie_taken_branch_wires    := '1';
+                end if;
+              end if;
+            end if;
+  
+            if decoded_instruction_IE(ILL_bit_position) = '1' then  -- ILLEGAL_INSTRUCTION
+              IE_except_condition_wires := '1';
+              ie_taken_branch_wires     := '1';
+            end if;
+  
+            if RV32M = 1 then
+  
+              if decoded_instruction_IE(MULH_bit_position)   = '1' or
+                 decoded_instruction_IE(MULHU_bit_position)  = '1' or
+                 decoded_instruction_IE(MULHSU_bit_position) = '1' then
+                case state_mulh is
+                  when init =>
+                    if RS1_Data_IE(31) = '1' and signed_op = '1' then
+                      RS1_Data_IE_int_wire <= std_logic_vector(signed(not(RS1_Data_IE))+1);
+                    else
+                      RS1_Data_IE_int_wire <= RS1_Data_IE;
+                    end if;
+                    if RS2_Data_IE(31) = '1' and signed_op = '1' and decoded_instruction_IE(MULHSU_bit_position) = '0' then
+                      RS2_Data_IE_int_wire <= std_logic_vector(signed(not(RS2_Data_IE))+1);
+                    else
+                      RS2_Data_IE_int_wire <= RS2_Data_IE;
+                    end if;
+                    nextstate_mulh <= mult;
+                    core_busy_IE_wires := '1';
+                  when mult =>
+                      partial_mulh_a_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(31 downto 16)) 
+                                                        * unsigned(RS2_Data_IE_int(31 downto 16)));
+                      partial_mulh_b_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(15 downto 0))   
+                                                        * unsigned(RS2_Data_IE_int(31 downto 16)));
+                      partial_mulh_c_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(31 downto 16)) 
+                                                        * unsigned(RS2_Data_IE_int(15 downto 0)));
+                      partial_mulh_d_wire <= std_logic_vector( unsigned(RS1_Data_IE_int(15 downto 0))   
+                                                        * unsigned(RS2_Data_IE_int(15 downto 0)));
+                    nextstate_mulh <= accum;
+                    core_busy_IE_wires := '1';
+                  when accum =>
+                    MUL_int <= std_logic_vector((        unsigned(partial_mulh_a) & unsigned(partial_mulh_d)) +
+                                              (x"0000" & unsigned(partial_mulh_b) & x"0000")                  +
+                                              (x"0000" & unsigned(partial_mulh_c) & x"0000"));
+                    if (RS1_Data_IE(31) /= RS2_Data_IE(31) and decoded_instruction_IE(MULH_bit_position) = '1') or
+                                          (RS1_Data_IE(31) = '1' and decoded_instruction_IE(MULHSU_bit_position) = '1') then
+                      MUL <= std_logic_vector(signed(not(MUL_int))+1);
+                    else
+                      MUL <= MUL_int;
+                    end if;
+                end case;
+              end if;
+  
+              if decoded_instruction_IE(MUL_bit_position) = '1' then
+                partial_mul_b_wire <= std_logic_vector( unsigned(RS1_Data_IE(15 downto 0))   
+                                                  * unsigned(RS2_Data_IE(31 downto 16)));
+                partial_mul_c_wire <= std_logic_vector( unsigned(RS1_Data_IE(31 downto 16)) 
+                                                  * unsigned(RS2_Data_IE(15 downto 0)));
+                partial_mul_d_wire <= std_logic_vector( unsigned(RS1_Data_IE(15 downto 0))   
+                                                  * unsigned(RS2_Data_IE(15 downto 0)));
+                MUL_low <= std_logic_vector((unsigned(partial_mul_d_wire(31 downto 16)) +
+                                             unsigned(partial_mul_b_wire(15 downto 0))  +
+                                             unsigned(partial_mul_c_wire(15 downto 0))) &
+                                             unsigned(partial_mul_d_wire(15 downto 0)));
+              end if;
+  
+              if decoded_instruction_IE(DIV_bit_position)  = '1' or 
+                 decoded_instruction_IE(REM_bit_position)  = '1' or
+                 decoded_instruction_IE(DIVU_bit_position) = '1' or 
+                 decoded_instruction_IE(REMU_bit_position) = '1' then
+                case state_div is
+                  when init =>
+                    if RS1_Data_IE(31) = '0' or signed_op = '0' then
+                      res_wire <= (31 downto 0 => '0') & RS1_Data_IE;
+                    else
+                      RS1_Data_IE_int_wire <= std_logic_vector(signed(not(RS1_Data_IE)) + 1);
+                      res_wire <= (31 downto 0 => '0') & RS1_Data_IE_int_wire;
+                    end if;
+                    if RS2_Data_IE(31) = '0' or signed_op = '0' then
+                      RS2_Data_IE_int_wire <= RS2_Data_IE;
+                    else
+                      RS2_Data_IE_int_wire <= std_logic_vector(signed(not(RS2_Data_IE)) + 1);
+                    end if;
+                    nextstate_div <= divide;
+                    core_busy_IE_wires := '1';
+                  when divide =>
+                    if div_count(5) /= '1' then
+                      div_count_wire <= div_count + 1;
+                      nextstate_div <= divide;
+                      core_busy_IE_wires := '1';
+                    end if;
+                    if sub(32) = '1' then -- RS2_Data_IE is the divisor
+                      res_wire <= res(62 downto 0) & '0';
+                    else
+                      res_wire <= sub(31 downto 0) & res(30 downto 0) & '1';
+                    end if;
+                    sub <= std_logic_vector(('0' & unsigned(res(62 downto 31))) - ('0' & unsigned(RS2_Data_IE_int)));
+                end case; 
+              end if;
+  
+            end if; -- END RV32M
+  
+          -- EXECUTE OF INSTRUCTION (END)
+          end if;  -- instr_rvalid_IE values 
+  
+        when csr_instr_wait_state =>
+          if csr_instr_done = '0' then
+            nextstate_IE_wires := csr_instr_wait_state;
+            core_busy_IE_wires := '1';
+          elsif (csr_instr_done = '1' and csr_access_denied_o = '1') then  -- ILLEGAL_INSTRUCTION
+            nextstate_IE_wires        := normal;
+            IE_except_condition_wires := '1';
+            ie_taken_branch_wires     := '1';
+          else
+            nextstate_IE_wires := normal;
+          end if;
+  
+  
+      end case;  -- fsm_IE state cases
+  
+      absolute_jump              <= absolute_jump_wires;
+      --core_busy_IE_int           <= core_busy_IE_wires;
+      if (core_busy_IE_wires = '1') or (unsigned(debug_pc_taken_wire) /= 0) then
+        core_busy_IE_int <= '1';
+      else
+        core_busy_IE_int <= '0';
+      end if;
+      IE_except_condition        <= IE_except_condition_wires;
+      set_branch_condition       <= set_branch_condition_wires;
+      served_irq                 <= served_irq_wires;
+      ie_taken_branch            <= ie_taken_branch_wires;
+      set_mret_condition         <= set_mret_condition_wires;
+      set_wfi_condition          <= set_wfi_condition_wires;
+      jump_instr_int             <= jump_instr_wires;
+      branch_instr_int           <= branch_instr_wires;
+      ebreak_instr               <= ebreak_instr_wires;
+      dret_instr                 <= dret_instr_wires;
+      nextstate_IE               <= nextstate_IE_wires;
+      WFI_Instr                  <= WFI_Instr_wires;
+    end process;
+  end generate debug_ie_asin_en;
 
   fsm_IE_state : process(clk_i, rst_ni) -- also implements the delay slot counters and some aux signals
   begin
